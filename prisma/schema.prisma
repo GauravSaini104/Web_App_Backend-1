@@ -1,0 +1,458 @@
+// Prisma schema for the grocery platform backend.
+// Docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UnitOfMeasure {
+  G
+  KG
+  ML
+  L
+  PCS
+}
+
+// A customer identified by phone number (verified via OTP) — the primary
+// identity for ordering. No password: phone + OTP is the whole login.
+model Customer {
+  id               String   @id @default(cuid())
+  phone            String   @unique
+  name             String?
+  isPhoneVerified  Boolean  @default(false)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  addresses Address[]
+  cartItems CartItem[]
+  orders    Order[]
+
+  @@map("customers")
+}
+
+// A delivery address belonging to one customer. Kept separate from
+// Customer since someone can have more than one (e.g. "Home", "Work").
+model Address {
+  id         String  @id @default(cuid())
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  label String? // e.g. "Home", "Work" — a convenience label, not required
+  line1 String
+  line2 String?
+  city  String
+  state String
+  pincode String
+
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([customerId])
+  @@map("addresses")
+}
+
+// A one-time password issued to verify a phone number. Never store the
+// raw code — only its hash, compared on verify. Rows are effectively
+// disposable: once consumed or expired they're just kept for a short
+// audit trail, not reused.
+model OtpRequest {
+  id        String    @id @default(cuid())
+  phone     String
+  codeHash  String
+  expiresAt DateTime
+  consumedAt DateTime?
+  attempts  Int       @default(0)
+  createdAt DateTime  @default(now())
+
+  @@index([phone])
+  @@map("otp_requests")
+}
+
+// A staff account for the fulfillment/admin side — separate from Customer
+// since it's a completely different login mechanism (username/password,
+// not phone/OTP) and a different trust level.
+model StaffUser {
+  id           String   @id @default(cuid())
+  username     String   @unique
+  passwordHash String
+  displayName  String
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@map("staff_users")
+}
+
+model Category {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String   @unique
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  products Product[]
+
+  @@index([isActive])
+  @@map("categories")
+}
+
+model Brand {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  products Product[]
+
+  @@index([isActive])
+  @@map("brands")
+}
+
+// A Product is the thing a customer thinks of as "one item" — e.g. "Tata
+// Sugar". It carries everything shared across every pack size: name, brand,
+// category, description, photo.
+model Product {
+  id          String  @id @default(cuid())
+  name        String
+  slug        String  @unique
+  description String?
+
+  brandId    String?
+  categoryId String
+
+  imageUrl  String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  brand    Brand?           @relation(fields: [brandId], references: [id])
+  category Category         @relation(fields: [categoryId], references: [id])
+  variants ProductVariant[]
+
+  @@index([categoryId])
+  @@index([brandId])
+  @@index([isActive])
+  @@index([name])
+  @@map("products")
+}
+
+// A ProductVariant is one specific, sellable, purchasable pack size of a
+// Product — e.g. "Tata Sugar, 1kg". Every field that differs by pack size
+// (barcode, price, weight) lives here, not on Product.
+model ProductVariant {
+  id        String @id @default(cuid())
+  productId String
+  sku       String @unique
+
+  // Monetary values use Decimal (fixed-point), never Float, to avoid
+  // floating-point rounding errors with money.
+  mrp          Decimal @db.Decimal(10, 2)
+  sellingPrice Decimal @db.Decimal(10, 2)
+
+  // weight = the quantity in `unit` (e.g. unit=KG, weight=1 means a 1kg pack).
+  unit   UnitOfMeasure
+  weight Decimal       @db.Decimal(10, 3)
+
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Restrict, not Cascade: "deleting" a product/variant through the API is
+  // actually a soft delete (isActive set to false) precisely so this never
+  // fires in normal use. This is the database-level backstop in case
+  // something ever tries a real hard delete directly — it refuses, rather
+  // than silently wiping out a variant's future stock/order history.
+  product Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  inventory    Inventory?
+  reservations StockReservation[]
+  transactions InventoryTransaction[]
+  cartItems    CartItem[]
+  orderItems   OrderItem[]
+
+  @@index([productId])
+  @@index([isActive])
+  @@index([sellingPrice])
+  @@map("product_variants")
+}
+
+// One line item in a customer's cart. No separate "Cart" wrapper entity —
+// a customer only ever has one active cart and it carries no state of its
+// own beyond its items, so that would just be an empty table in the middle.
+// Adding to cart never touches Inventory (no check, no reservation) — real
+// stock verification happens once at checkout (Step 5: Orders).
+model CartItem {
+  id         String   @id @default(cuid())
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  variantId String
+  variant   ProductVariant @relation(fields: [variantId], references: [id], onDelete: Cascade)
+
+  quantity  Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // One row per (customer, variant) — adding the same item again increases
+  // its quantity instead of creating a duplicate line.
+  @@unique([customerId, variantId])
+  @@index([customerId])
+  @@map("cart_items")
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  CONFIRMED
+  PACKED
+  READY // ready for the delivery rider, or ready for the customer to collect
+  COMPLETED // delivered, or picked up
+  CANCELLED
+}
+
+enum PaymentMethod {
+  UPI
+  CASH // covers both cash-on-delivery and cash-at-pickup
+}
+
+enum FulfillmentMethod {
+  DELIVERY
+  PICKUP
+}
+
+// A placed order. Money and item details are frozen at creation time — an
+// order must always show what was actually charged/ordered, never today's
+// catalog prices, even if those change later.
+model Order {
+  id          String @id @default(cuid())
+  // A short, human-friendly number for staff/customer conversations
+  // ("order #1042"), separate from the internal id.
+  orderNumber Int    @unique @default(autoincrement())
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  status            OrderStatus
+  paymentMethod     PaymentMethod
+  fulfillmentMethod FulfillmentMethod
+
+  // Delivery address, snapshotted at order time — populated only when
+  // fulfillmentMethod = DELIVERY. Survives the customer later editing or
+  // deleting the Address row it was copied from.
+  deliveryLabel   String?
+  deliveryLine1   String?
+  deliveryLine2   String?
+  deliveryCity    String?
+  deliveryState   String?
+  deliveryPincode String?
+
+  subtotal Decimal @db.Decimal(10, 2)
+  // Frozen at order creation, same reasoning as item prices — a receipt
+  // must always show what was actually charged, even if the fee config
+  // changes later. Always 0 for PICKUP orders.
+  deliveryFee Decimal @default(0) @db.Decimal(10, 2)
+
+  cancelledAt  DateTime?
+  cancelReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  items                 OrderItem[]
+  stockReservations     StockReservation[]
+  inventoryTransactions InventoryTransaction[]
+  payments              Payment[]
+
+  @@index([customerId])
+  @@index([status])
+  @@map("orders")
+}
+
+// One line of an order — a frozen snapshot of what was actually bought,
+// independent of anything that happens to the catalog afterwards.
+model OrderItem {
+  id      String @id @default(cuid())
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  variantId String
+  variant   ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+
+  productName String
+  sku         String
+  unit        UnitOfMeasure
+  weight      Decimal       @db.Decimal(10, 3)
+  unitPrice   Decimal       @db.Decimal(10, 2)
+  quantity    Int
+  lineTotal   Decimal       @db.Decimal(10, 2)
+
+  @@index([orderId])
+  @@index([variantId])
+  @@map("order_items")
+}
+
+enum PaymentProvider {
+  RAZORPAY
+}
+
+enum PaymentStatus {
+  CREATED // a payment session was created with the gateway, awaiting the customer
+  SUCCESS
+  FAILED
+}
+
+// One payment *attempt* for an order, not one row per order — a customer
+// can fail once (wrong UPI PIN, bank timeout) and retry, and each attempt
+// gets its own row for a clean audit trail of what actually happened.
+model Payment {
+  id      String @id @default(cuid())
+  orderId String
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  provider PaymentProvider @default(RAZORPAY)
+  // The gateway's own order id for this attempt (Razorpay's order_id).
+  providerOrderId String @unique
+  // Set once the gateway reports a captured payment (Razorpay's payment_id).
+  providerPaymentId String?
+
+  amount        Decimal       @db.Decimal(10, 2)
+  status        PaymentStatus @default(CREATED)
+  failureReason String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orderId])
+  @@index([status])
+  @@map("payments")
+}
+
+enum ReservationStatus {
+  ACTIVE
+  CONSUMED
+  RELEASED
+  EXPIRED
+}
+
+enum InventoryTransactionType {
+  RECEIVE
+  RESERVE
+  RELEASE
+  SALE
+  RETURN
+  ADJUSTMENT
+  DAMAGE
+  EXPIRED
+}
+
+// Current, authoritative stock state for one sellable pack size (one row
+// per ProductVariant). "Available" is never stored here — it's always
+// computed live as quantityOnHand minus currently-active reservations, so
+// it can never quietly drift out of sync with reality.
+model Inventory {
+  id        String  @id @default(cuid())
+  variantId String  @unique
+  variant   ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+
+  quantityOnHand Int @default(0)
+
+  // Optional per-variant override; NULL means "use the platform-wide
+  // default" (a config constant, not a settings table — see
+  // inventory.constants.ts). This is an alerting preference, not a safety
+  // mechanism.
+  lowStockThreshold Int?
+
+  // Manual admin hold, independent of stock count — e.g. a quality recall
+  // even though units are still physically on the shelf.
+  isSellable Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("inventory")
+}
+
+// A live, in-flight hold on stock — created the moment an order is placed
+// (not when something is merely added to a cart), so two customers can
+// never both buy the last unit. expiresAt is set once, at creation; a row
+// can sit at ACTIVE past that time — every read that computes "available"
+// filters on expiresAt, so a stale hold stops counting immediately even
+// before a future cleanup job gets around to formally marking it EXPIRED.
+model StockReservation {
+  id        String  @id @default(cuid())
+  variantId String
+  variant   ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+
+  orderId String?
+  order   Order?  @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  quantity  Int
+  status    ReservationStatus @default(ACTIVE)
+  expiresAt DateTime
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  transactions InventoryTransaction[]
+
+  @@index([variantId, status])
+  @@index([expiresAt])
+  @@index([orderId])
+  @@map("stock_reservations")
+}
+
+// The permanent, immutable audit ledger. Every stock movement of any kind
+// writes exactly one row here — rows are never edited or updated, only
+// inserted. Inventory holds the authoritative *current* state for normal
+// reads; this table is the authoritative *history*, not something normal
+// reads replay to reconstruct current state.
+model InventoryTransaction {
+  id        String  @id @default(cuid())
+  variantId String
+  variant   ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+
+  // Traces a movement back to the exact hold that caused it; NULL for
+  // movements with no reservation (receiving stock, manual adjustments).
+  reservationId String?
+  reservation   StockReservation? @relation(fields: [reservationId], references: [id], onDelete: SetNull)
+
+  orderId String?
+  order   Order?  @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  type InventoryTransactionType
+
+  onHandDelta   Int @default(0)
+  reservedDelta Int @default(0)
+
+  // Snapshots of the totals right after this event — avoids recomputing
+  // history to answer "what was the stock then?"
+  balanceOnHandAfter   Int
+  balanceReservedAfter Int
+
+  // Required (enforced in the service layer) for manual movements
+  // (RECEIVE / ADJUSTMENT / DAMAGE); auto-generated for order-driven ones.
+  reason String?
+
+  // Admin identifier for manual actions, "SYSTEM" for order-driven and
+  // cleanup-job events.
+  performedBy String?
+
+  createdAt DateTime @default(now())
+
+  @@index([variantId])
+  @@index([reservationId])
+  @@index([orderId])
+  @@index([type])
+  @@index([createdAt])
+  @@map("inventory_transactions")
+}

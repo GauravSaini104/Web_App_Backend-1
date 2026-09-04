@@ -1,0 +1,26 @@
+node_modules/
+dist/
+build/
+
+# Environment
+.env
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Test coverage
+coverage/
+
+# User-uploaded files — regenerated at runtime (see src/uploads for the
+# module handling them), not source. Anchored to the repo root so this
+# doesn't also match src/uploads/, which is real source code.
+/uploads/
