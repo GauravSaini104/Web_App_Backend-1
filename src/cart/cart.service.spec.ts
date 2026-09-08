@@ -64,9 +64,38 @@ describe('CartService', () => {
       const result = await service.getCart('cust_1');
 
       expect(result.items[0].lineTotal).toBe(104);
+      expect(result.items[0].lineSavings).toBe(6); // (55 - 52) * 2
       expect(result.items[0].isAvailable).toBe(true);
       expect(result.items[0].availableStock).toBe(10);
       expect(result.grandTotal).toBe(104);
+      expect(result.totalMrp).toBe(110);
+      expect(result.totalSavings).toBe(6);
+    });
+
+    it('resolves variant-specific imageUrl when present', async () => {
+      mockPrismaService.cartItem.findMany.mockResolvedValue([
+        {
+          id: 'item_1',
+          variantId: 'var_1',
+          quantity: 1,
+          variant: {
+            sku: 'OIL-1L',
+            unit: 'L',
+            weight: 1,
+            sellingPrice: 150,
+            mrp: 180,
+            imageUrl: '/uploads/variant_oil_1l.png',
+            isActive: true,
+            product: { id: 'prod_1', name: 'Mustard Oil', imageUrl: '/uploads/product_oil.png', isActive: true },
+          },
+        },
+      ]);
+      mockInventoryService.getInventory.mockResolvedValue({ available: 10, isSellable: true });
+
+      const result = await service.getCart('cust_1');
+
+      expect(result.items[0].imageUrl).toBe('/uploads/variant_oil_1l.png');
+      expect(result.totalSavings).toBe(30);
     });
 
     it('marks an item unavailable when its product/variant has been retired', async () => {

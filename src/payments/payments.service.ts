@@ -1,10 +1,12 @@
 import {
   BadRequestException,
+  Inject,
   Injectable,
   InternalServerErrorException,
   Logger,
   NotFoundException,
   UnauthorizedException,
+  forwardRef,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { OrderStatus, PaymentMethod, PaymentStatus } from '@prisma/client';
@@ -26,6 +28,7 @@ interface RazorpayWebhookBody {
       entity?: {
         id: string;
         order_id: string;
+        method?: string;
         error_description?: string;
       };
     };
@@ -39,6 +42,7 @@ export class PaymentsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly configService: ConfigService,
+    @Inject(forwardRef(() => OrdersService))
     private readonly ordersService: OrdersService,
   ) {}
 
@@ -139,6 +143,9 @@ export class PaymentsService {
     }
 
     if (body.event === 'payment.captured') {
+      const paymentMethod = paymentEntity.method ? ` (${paymentEntity.method})` : '';
+      this.logger.log(`Payment captured for order ${payment.orderId}${paymentMethod}`);
+
       await this.prisma.payment.update({
         where: { id: payment.id },
         data: { status: PaymentStatus.SUCCESS, providerPaymentId: paymentEntity.id },
@@ -165,6 +172,58 @@ export class PaymentsService {
     }
 
     return { received: true };
+  }
+
+  async refundPayment(orderId: string, reason?: string) {
+    const payment = await this.prisma.payment.findFirst({
+      where: { orderId, status: PaymentStatus.SUCCESS },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (!payment || !payment.providerPaymentId) {
+      this.logger.warn(`No captured payment found to refund for order ${orderId}`);
+      return null;
+    }
+
+    if (!this.isConfigured()) {
+      this.logger.warn(
+        `[DEV REFUND] Skipping Razorpay refund for payment ${payment.providerPaymentId} (order ${orderId}): ${reason ?? 'Cancelled'}`,
+      );
+      return { refunded: true, devMode: true };
+    }
+
+    const keyId = this.configService.get<string>('RAZORPAY_KEY_ID')!.trim();
+    const keySecret = this.configService.get<string>('RAZORPAY_KEY_SECRET')!.trim();
+    const auth = Buffer.from(`${keyId}:${keySecret}`).toString('base64');
+
+    try {
+      const response = await fetch(
+        `https://api.razorpay.com/v1/payments/${payment.providerPaymentId}/refund`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            notes: { reason: reason ?? 'Order cancelled by customer/staff' },
+          }),
+        },
+      );
+
+      const data = (await response.json()) as { id?: string; error?: { description?: string } };
+      if (!response.ok) {
+        this.logger.error(
+          `Razorpay refund failed for order ${orderId}: ${JSON.stringify(data)}`,
+        );
+        return { refunded: false, error: data };
+      }
+
+      this.logger.log(`Refund initiated successfully for order ${orderId} via Razorpay (refund_id=${data.id})`);
+      return { refunded: true, refundId: data.id };
+    } catch (error) {
+      this.logger.error(
+        `Failed to trigger Razorpay refund for order ${orderId}: ${(error as Error).message}`,
+      );
+      return { refunded: false, error: (error as Error).message };
+    }
   }
 
   private verifySignature(rawBody: Buffer, signature: string): boolean {

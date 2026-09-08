@@ -1,5 +1,6 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { Request } from 'express';
 import { PrismaService } from '../database/prisma.service';
 import { slugify } from '../common/utils/slugify';
 import { handlePrismaError } from '../common/utils/prisma-error.util';
@@ -10,45 +11,144 @@ import { QueryProductDto } from './dto/query-product.dto';
 import { CreateProductVariantDto } from './dto/create-product-variant.dto';
 import { UpdateProductVariantDto } from './dto/update-product-variant.dto';
 import { DEFAULT_LOW_STOCK_THRESHOLD } from '../inventory/inventory.constants';
+import { getFullImageUrl } from '../uploads/uploads.config';
 
 const PRODUCT_INCLUDE = { brand: true, category: true, variants: true } as const;
+
+export function formatImageUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const baseUrl = (process.env.BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
+
+  if (url.startsWith('data:')) {
+    return url;
+  }
+
+  if (url.includes('/uploads/products/')) {
+    const filename = url.split('/uploads/products/')[1].split('?')[0];
+    return `${baseUrl}/uploads/products/${filename}`;
+  }
+
+  if (url.includes('/uploads/')) {
+    const relativePath = url.split('/uploads/')[1].split('?')[0];
+    return `${baseUrl}/uploads/${relativePath}`;
+  }
+
+  if (url.startsWith('http://') || url.startsWith('https://')) {
+    return url;
+  }
+
+  const cleanPath = url.startsWith('/') ? url : `/${url}`;
+  return `${baseUrl}${cleanPath}`;
+}
 
 @Injectable()
 export class ProductsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async create(dto: CreateProductDto) {
+  private formatProduct<T extends Record<string, any>>(product: T): T {
+    if (!product) return product;
+    return {
+      ...product,
+      ...(product.imageUrl !== undefined && { imageUrl: formatImageUrl(product.imageUrl) }),
+      ...(product.images !== undefined && {
+        images: Array.isArray(product.images)
+          ? product.images.map((img: string) => formatImageUrl(img) || img)
+          : [],
+      }),
+      ...(Array.isArray(product.variants) && {
+        variants: product.variants.map((v: any) => ({
+          ...v,
+          ...(v.imageUrl !== undefined && { imageUrl: formatImageUrl(v.imageUrl) }),
+          ...(v.images !== undefined && {
+            images: Array.isArray(v.images)
+              ? v.images.map((img: string) => formatImageUrl(img) || img)
+              : [],
+          }),
+        })),
+      }),
+      ...(product.product && {
+        product: this.formatProduct(product.product),
+      }),
+    };
+  }
+
+  async create(dto: CreateProductDto, files?: Express.Multer.File[], req?: Request) {
     dto.variants.forEach((variant) =>
       this.assertSellingPriceValid(variant.mrp, variant.sellingPrice),
     );
 
+    // Handle physical uploaded files if provided
+    if (files && files.length > 0) {
+      const productUploadedUrls: string[] = [];
+
+      for (const file of files) {
+        const fullUrl = getFullImageUrl(file.filename, req);
+
+        // Check if file is assigned to a specific variant (e.g. variants[0][images] or variant_0_image)
+        const variantMatch = file.fieldname.match(/variants?\[?(\d+)\]?/i);
+        if (variantMatch) {
+          const index = parseInt(variantMatch[1], 10);
+          if (dto.variants && dto.variants[index]) {
+            const vImages = dto.variants[index].images || [];
+            dto.variants[index].images = [...vImages, fullUrl];
+            if (!dto.variants[index].imageUrl) {
+              dto.variants[index].imageUrl = fullUrl;
+            }
+            continue;
+          }
+        }
+
+        // Otherwise it's a product-level image
+        productUploadedUrls.push(fullUrl);
+      }
+
+      if (productUploadedUrls.length > 0) {
+        const currentImages = dto.images || [];
+        dto.images = [...currentImages, ...productUploadedUrls];
+        if (!dto.imageUrl) {
+          dto.imageUrl = dto.images[0];
+        }
+      }
+    }
+
+    const productImages = dto.images ?? (dto.imageUrl ? [dto.imageUrl] : []);
+    const productImageUrl = dto.imageUrl ?? (productImages.length > 0 ? productImages[0] : null);
+
     try {
-      return await this.prisma.product.create({
+      const product = await this.prisma.product.create({
         data: {
           name: dto.name,
           slug: dto.slug ?? slugify(dto.name),
           description: dto.description,
           brandId: dto.brandId,
           categoryId: dto.categoryId,
-          imageUrl: dto.imageUrl,
+          imageUrl: productImageUrl,
+          images: productImages,
           isActive: dto.isActive,
           variants: {
-            create: dto.variants.map((variant) => ({
-              sku: variant.sku,
-              mrp: variant.mrp,
-              sellingPrice: variant.sellingPrice,
-              unit: variant.unit,
-              weight: variant.weight,
-              isActive: variant.isActive,
-              // Every variant needs a stock record to exist at all — start
-              // it at 0 on-hand rather than leaving inventory undefined
-              // for a brand-new pack size.
-              inventory: { create: {} },
-            })),
+            create: dto.variants.map((variant) => {
+              const variantImages = variant.images ?? (variant.imageUrl ? [variant.imageUrl] : []);
+              const variantImageUrl = variant.imageUrl ?? (variantImages.length > 0 ? variantImages[0] : null);
+              return {
+                sku: variant.sku,
+                mrp: variant.mrp,
+                sellingPrice: variant.sellingPrice,
+                unit: variant.unit,
+                weight: variant.weight,
+                imageUrl: variantImageUrl,
+                images: variantImages,
+                isActive: variant.isActive,
+                // Every variant needs a stock record to exist at all — start
+                // it at 0 on-hand rather than leaving inventory undefined
+                // for a brand-new pack size.
+                inventory: { create: {} },
+              };
+            }),
           },
         },
         include: PRODUCT_INCLUDE,
       });
+      return this.formatProduct(product);
     } catch (error) {
       handlePrismaError(error, 'Product');
     }
@@ -159,26 +259,43 @@ export class ProductsService {
       reservedRows.map((row) => [row.variantId, row._sum.quantity ?? 0]),
     );
 
-    return products.map((product) => ({
-      ...product,
-      variants: product.variants.map((variant) => {
-        const inventory = inventoryByVariant.get(variant.id);
-        const reserved = reservedByVariant.get(variant.id) ?? 0;
-        const available = (inventory?.quantityOnHand ?? 0) - reserved;
-        const threshold = inventory?.lowStockThreshold ?? DEFAULT_LOW_STOCK_THRESHOLD;
-        return {
-          ...variant,
-          isAvailable: Boolean(inventory?.isSellable) && available > 0,
-          isLowStock: available > 0 && available <= threshold,
-        };
-      }),
-    }));
+    return products.map((product) => {
+      const formatted = this.formatProduct(product);
+      return {
+        ...formatted,
+        variants: (formatted.variants || []).map((variant: any) => {
+          const inventory = inventoryByVariant.get(variant.id);
+          const reserved = reservedByVariant.get(variant.id) ?? 0;
+          const available = (inventory?.quantityOnHand ?? 0) - reserved;
+          const threshold = inventory?.lowStockThreshold ?? DEFAULT_LOW_STOCK_THRESHOLD;
+          return {
+            ...variant,
+            isAvailable: Boolean(inventory?.isSellable) && available > 0,
+            isLowStock: available > 0 && available <= threshold,
+          };
+        }),
+      };
+    });
   }
 
-  async update(id: string, dto: UpdateProductDto) {
+  async update(
+    id: string,
+    dto: UpdateProductDto,
+    files?: Express.Multer.File[],
+    req?: Request,
+  ) {
     await this.findOne(id);
+
+    if (files && files.length > 0) {
+      const uploadedUrls = files.map((f) => getFullImageUrl(f.filename, req));
+      dto.images = [...(dto.images || []), ...uploadedUrls];
+      if (!dto.imageUrl && dto.images.length > 0) {
+        dto.imageUrl = dto.images[0];
+      }
+    }
+
     try {
-      return await this.prisma.product.update({
+      const updated = await this.prisma.product.update({
         where: { id },
         data: {
           name: dto.name,
@@ -187,10 +304,12 @@ export class ProductsService {
           brandId: dto.brandId,
           categoryId: dto.categoryId,
           imageUrl: dto.imageUrl,
+          images: dto.images,
           isActive: dto.isActive,
         },
         include: PRODUCT_INCLUDE,
       });
+      return this.formatProduct(updated);
     } catch (error) {
       handlePrismaError(error, 'Product');
     }
@@ -218,12 +337,28 @@ export class ProductsService {
     }
   }
 
-  async addVariant(productId: string, dto: CreateProductVariantDto) {
+  async addVariant(
+    productId: string,
+    dto: CreateProductVariantDto,
+    files?: Express.Multer.File[],
+    req?: Request,
+  ) {
     await this.findOne(productId);
     this.assertSellingPriceValid(dto.mrp, dto.sellingPrice);
 
+    if (files && files.length > 0) {
+      const uploadedUrls = files.map((f) => getFullImageUrl(f.filename, req));
+      dto.images = [...(dto.images || []), ...uploadedUrls];
+      if (!dto.imageUrl && dto.images.length > 0) {
+        dto.imageUrl = dto.images[0];
+      }
+    }
+
+    const variantImages = dto.images ?? (dto.imageUrl ? [dto.imageUrl] : []);
+    const variantImageUrl = dto.imageUrl ?? (variantImages.length > 0 ? variantImages[0] : null);
+
     try {
-      return await this.prisma.productVariant.create({
+      const variant = await this.prisma.productVariant.create({
         data: {
           productId,
           sku: dto.sku,
@@ -231,24 +366,41 @@ export class ProductsService {
           sellingPrice: dto.sellingPrice,
           unit: dto.unit,
           weight: dto.weight,
+          imageUrl: variantImageUrl,
+          images: variantImages,
           isActive: dto.isActive,
           inventory: { create: {} },
         },
       });
+      return this.formatProduct(variant);
     } catch (error) {
       handlePrismaError(error, 'Product variant');
     }
   }
 
-  async updateVariant(productId: string, variantId: string, dto: UpdateProductVariantDto) {
+  async updateVariant(
+    productId: string,
+    variantId: string,
+    dto: UpdateProductVariantDto,
+    files?: Express.Multer.File[],
+    req?: Request,
+  ) {
     const variant = await this.findVariantOrThrow(productId, variantId);
 
     const mrp = dto.mrp ?? Number(variant.mrp);
     const sellingPrice = dto.sellingPrice ?? Number(variant.sellingPrice);
     this.assertSellingPriceValid(mrp, sellingPrice);
 
+    if (files && files.length > 0) {
+      const uploadedUrls = files.map((f) => getFullImageUrl(f.filename, req));
+      dto.images = [...(dto.images || []), ...uploadedUrls];
+      if (!dto.imageUrl && dto.images.length > 0) {
+        dto.imageUrl = dto.images[0];
+      }
+    }
+
     try {
-      return await this.prisma.productVariant.update({
+      const updated = await this.prisma.productVariant.update({
         where: { id: variantId },
         data: {
           sku: dto.sku,
@@ -256,9 +408,12 @@ export class ProductsService {
           sellingPrice: dto.sellingPrice,
           unit: dto.unit,
           weight: dto.weight,
+          imageUrl: dto.imageUrl,
+          images: dto.images,
           isActive: dto.isActive,
         },
       });
+      return this.formatProduct(updated);
     } catch (error) {
       handlePrismaError(error, 'Product variant');
     }

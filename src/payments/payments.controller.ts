@@ -19,7 +19,7 @@ import { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 export class PaymentsController {
   constructor(private readonly paymentsService: PaymentsService) {}
 
-  @Post('orders/:id/pay')
+  @Post(['orders/:id/pay', 'payments/:id/initiate'])
   @UseGuards(CustomerAuthGuard)
   initiatePayment(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
     return this.paymentsService.initiatePayment(user.id, id);

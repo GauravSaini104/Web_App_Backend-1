@@ -17,6 +17,8 @@ import { ReturnStockDto } from './dto/return-stock.dto';
 import { CreateReservationDto } from './dto/create-reservation.dto';
 import { UpdateInventorySettingsDto } from './dto/update-inventory-settings.dto';
 import { StaffAuthGuard } from '../auth/guards/staff-auth.guard';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 
 // Every endpoint here is a staff/internal action — there's no customer-facing
 // route in this controller. Once Orders exists, it calls InventoryService
@@ -25,7 +27,7 @@ import { StaffAuthGuard } from '../auth/guards/staff-auth.guard';
 @Controller()
 @UseGuards(StaffAuthGuard)
 export class InventoryController {
-  constructor(private readonly inventoryService: InventoryService) {}
+  constructor(private readonly inventoryService: InventoryService) { }
 
   @Get('inventory/:variantId')
   getInventory(@Param('variantId') variantId: string) {
@@ -43,22 +45,50 @@ export class InventoryController {
   }
 
   @Post('inventory/:variantId/receive')
-  receiveStock(@Param('variantId') variantId: string, @Body() dto: ReceiveStockDto) {
+  receiveStock(
+    @Param('variantId') variantId: string,
+    @Body() dto: ReceiveStockDto,
+    @CurrentUser() user?: AuthenticatedUser,
+  ) {
+    if (!dto.performedBy && user?.id) {
+      dto.performedBy = `staff:${user.id}`;
+    }
     return this.inventoryService.receiveStock(variantId, dto);
   }
 
   @Post('inventory/:variantId/adjust')
-  adjustStock(@Param('variantId') variantId: string, @Body() dto: AdjustStockDto) {
+  adjustStock(
+    @Param('variantId') variantId: string,
+    @Body() dto: AdjustStockDto,
+    @CurrentUser() user?: AuthenticatedUser,
+  ) {
+    if (!dto.performedBy && user?.id) {
+      dto.performedBy = `staff:${user.id}`;
+    }
     return this.inventoryService.adjustStock(variantId, dto);
   }
 
   @Post('inventory/:variantId/write-off')
-  writeOffStock(@Param('variantId') variantId: string, @Body() dto: WriteOffStockDto) {
+  writeOffStock(
+    @Param('variantId') variantId: string,
+    @Body() dto: WriteOffStockDto,
+    @CurrentUser() user?: AuthenticatedUser,
+  ) {
+    if (!dto.performedBy && user?.id) {
+      dto.performedBy = `staff:${user.id}`;
+    }
     return this.inventoryService.writeOffStock(variantId, dto);
   }
 
   @Post('inventory/:variantId/return')
-  returnStock(@Param('variantId') variantId: string, @Body() dto: ReturnStockDto) {
+  returnStock(
+    @Param('variantId') variantId: string,
+    @Body() dto: ReturnStockDto,
+    @CurrentUser() user?: AuthenticatedUser,
+  ) {
+    if (!dto.performedBy && user?.id) {
+      dto.performedBy = `staff:${user.id}`;
+    }
     return this.inventoryService.returnStock(variantId, dto);
   }
 

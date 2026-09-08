@@ -13,10 +13,10 @@ export class ReturnStockDto {
   @MaxLength(500)
   reason!: string;
 
+  @IsOptional()
   @IsString()
-  @MinLength(1)
   @MaxLength(100)
-  performedBy!: string;
+  performedBy?: string;
 
   /** Placeholder until Orders exist — which order this return relates to. */
   @IsOptional()

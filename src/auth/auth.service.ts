@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
+import { Cron } from '@nestjs/schedule';
 import * as bcrypt from 'bcrypt';
 import { createHash } from 'node:crypto';
 import { PrismaService } from '../database/prisma.service';
@@ -17,9 +18,11 @@ import { StaffRegisterDto } from './dto/staff-register.dto';
 import { StaffLoginDto } from './dto/staff-login.dto';
 import { AuthenticatedUser } from './strategies/jwt.strategy';
 import {
+  CUSTOMER_REFRESH_TOKEN_EXPIRY,
   CUSTOMER_TOKEN_EXPIRY,
   OTP_EXPIRY_MINUTES,
   OTP_MAX_ATTEMPTS,
+  STAFF_REFRESH_TOKEN_EXPIRY,
   STAFF_TOKEN_EXPIRY,
 } from './auth.constants';
 
@@ -68,6 +71,28 @@ export class AuthService {
     };
   }
 
+  private readonly blacklistedTokens = new Set<string>();
+
+  @Cron('0 */15 * * * *')
+  async purgeExpiredOtps() {
+    try {
+      const result = await this.prisma.otpRequest.deleteMany({
+        where: {
+          OR: [
+            { expiresAt: { lt: new Date() } },
+            { consumedAt: { not: null } },
+          ],
+        },
+      });
+      if (result.count > 0) {
+        this.logger.log(`Purged ${result.count} expired/consumed OTP rows`);
+      }
+      return { purgedCount: result.count };
+    } catch (error) {
+      this.logger.error(`Error purging expired OTPs: ${(error as Error).message}`);
+    }
+  }
+
   async verifyOtp(phone: string, code: string) {
     const otpRequest = await this.prisma.otpRequest.findFirst({
       where: { phone, consumedAt: null, expiresAt: { gt: new Date() } },
@@ -100,12 +125,18 @@ export class AuthService {
       create: { phone, isPhoneVerified: true },
     });
 
-    const accessToken = await this.jwtService.signAsync(
-      { sub: customer.id, type: 'customer' },
-      { expiresIn: CUSTOMER_TOKEN_EXPIRY },
-    );
+    const [accessToken, refreshToken] = await Promise.all([
+      this.jwtService.signAsync(
+        { sub: customer.id, type: 'customer' },
+        { expiresIn: CUSTOMER_TOKEN_EXPIRY },
+      ),
+      this.jwtService.signAsync(
+        { sub: customer.id, type: 'customer', isRefreshToken: true },
+        { expiresIn: CUSTOMER_REFRESH_TOKEN_EXPIRY },
+      ),
+    ]);
 
-    return { accessToken, customer };
+    return { accessToken, refreshToken, customer };
   }
 
   /**
@@ -142,15 +173,98 @@ export class AuthService {
       throw new UnauthorizedException('Invalid username or password');
     }
 
-    const accessToken = await this.jwtService.signAsync(
-      { sub: staff.id, type: 'staff' },
-      { expiresIn: STAFF_TOKEN_EXPIRY },
-    );
+    const [accessToken, refreshToken] = await Promise.all([
+      this.jwtService.signAsync(
+        { sub: staff.id, type: 'staff' },
+        { expiresIn: STAFF_TOKEN_EXPIRY },
+      ),
+      this.jwtService.signAsync(
+        { sub: staff.id, type: 'staff', isRefreshToken: true },
+        { expiresIn: STAFF_REFRESH_TOKEN_EXPIRY },
+      ),
+    ]);
 
     return {
       accessToken,
+      refreshToken,
       staff: { id: staff.id, username: staff.username, displayName: staff.displayName },
     };
+  }
+
+  async refreshToken(token: string) {
+    try {
+      const payload = await this.jwtService.verifyAsync<{
+        sub: string;
+        type: 'customer' | 'staff';
+        isRefreshToken?: boolean;
+      }>(token);
+
+      if (!payload.isRefreshToken) {
+        throw new UnauthorizedException('Provided token is not a refresh token');
+      }
+
+      if (this.isTokenRevoked(token)) {
+        throw new UnauthorizedException('Refresh token has been revoked');
+      }
+
+      if (payload.type === 'customer') {
+        const customer = await this.prisma.customer.findUnique({ where: { id: payload.sub } });
+        if (!customer) {
+          throw new UnauthorizedException('User account no longer exists');
+        }
+
+        const [newAccessToken, newRefreshToken] = await Promise.all([
+          this.jwtService.signAsync(
+            { sub: customer.id, type: 'customer' },
+            { expiresIn: CUSTOMER_TOKEN_EXPIRY },
+          ),
+          this.jwtService.signAsync(
+            { sub: customer.id, type: 'customer', isRefreshToken: true },
+            { expiresIn: CUSTOMER_REFRESH_TOKEN_EXPIRY },
+          ),
+        ]);
+
+        return { accessToken: newAccessToken, refreshToken: newRefreshToken, user: customer };
+      } else {
+        const staff = await this.prisma.staffUser.findUnique({ where: { id: payload.sub } });
+        if (!staff || !staff.isActive) {
+          throw new UnauthorizedException('Staff account no longer active');
+        }
+
+        const [newAccessToken, newRefreshToken] = await Promise.all([
+          this.jwtService.signAsync(
+            { sub: staff.id, type: 'staff' },
+            { expiresIn: STAFF_TOKEN_EXPIRY },
+          ),
+          this.jwtService.signAsync(
+            { sub: staff.id, type: 'staff', isRefreshToken: true },
+            { expiresIn: STAFF_REFRESH_TOKEN_EXPIRY },
+          ),
+        ]);
+
+        return {
+          accessToken: newAccessToken,
+          refreshToken: newRefreshToken,
+          user: { id: staff.id, username: staff.username, displayName: staff.displayName },
+        };
+      }
+    } catch (error) {
+      if (error instanceof UnauthorizedException) {
+        throw error;
+      }
+      throw new UnauthorizedException('Invalid or expired refresh token');
+    }
+  }
+
+  logout(token?: string) {
+    if (token) {
+      this.blacklistedTokens.add(token);
+    }
+    return { message: 'Logged out successfully' };
+  }
+
+  isTokenRevoked(token: string): boolean {
+    return this.blacklistedTokens.has(token);
   }
 
   async getCurrentUser(user: AuthenticatedUser) {

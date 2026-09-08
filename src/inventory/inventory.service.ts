@@ -1,4 +1,5 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { Cron } from '@nestjs/schedule';
 import { InventoryTransactionType, Prisma } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { handlePrismaError } from '../common/utils/prisma-error.util';
@@ -21,6 +22,8 @@ type DbClient = PrismaService | Prisma.TransactionClient;
 
 @Injectable()
 export class InventoryService {
+  private readonly logger = new Logger(InventoryService.name);
+
   constructor(private readonly prisma: PrismaService) {}
 
   /** Current state plus everything computed live: never trust a cached number for these. */
@@ -75,7 +78,12 @@ export class InventoryService {
    * multi-item checkout) or call `reserveStock()` for a one-off standalone
    * reservation, which just wraps this in its own transaction.
    */
-  async reserveStockTx(tx: Prisma.TransactionClient, variantId: string, dto: CreateReservationDto) {
+  async reserveStockTx(
+    tx: Prisma.TransactionClient,
+    variantId: string,
+    dto: CreateReservationDto,
+    performedBy = 'SYSTEM',
+  ) {
     const rows = await tx.$queryRaw<InventoryRow[]>`
       SELECT "id", "quantityOnHand", "isSellable" FROM "inventory" WHERE "variantId" = ${variantId} FOR UPDATE
     `;
@@ -109,7 +117,7 @@ export class InventoryService {
         balanceOnHandAfter: inventory.quantityOnHand,
         balanceReservedAfter: currentlyReserved + dto.quantity,
         reason: dto.orderId ? `Reserved for order ${dto.orderId}` : 'Manual reservation',
-        performedBy: 'SYSTEM',
+        performedBy,
       },
     });
 
@@ -117,12 +125,19 @@ export class InventoryService {
   }
 
   /** Cancelled before payment, payment failed, or the customer backed out — frees the hold. */
-  releaseReservation(reservationId: string, reason?: string) {
-    return this.prisma.$transaction((tx) => this.releaseReservationTx(tx, reservationId, reason));
+  releaseReservation(reservationId: string, reason?: string, performedBy = 'SYSTEM') {
+    return this.prisma.$transaction((tx) =>
+      this.releaseReservationTx(tx, reservationId, reason, performedBy),
+    );
   }
 
   /** Composable version — see reserveStockTx for why this split exists. */
-  async releaseReservationTx(tx: Prisma.TransactionClient, reservationId: string, reason?: string) {
+  async releaseReservationTx(
+    tx: Prisma.TransactionClient,
+    reservationId: string,
+    reason?: string,
+    performedBy = 'SYSTEM',
+  ) {
     const updateResult = await tx.stockReservation.updateMany({
       where: { id: reservationId, status: 'ACTIVE' },
       data: { status: 'RELEASED' },
@@ -152,7 +167,7 @@ export class InventoryService {
           (reservation.orderId
             ? `Order ${reservation.orderId} cancelled or payment failed`
             : 'Manual release'),
-        performedBy: 'SYSTEM',
+        performedBy,
       },
     });
 
@@ -164,7 +179,7 @@ export class InventoryService {
    * actually leaves onHand, deliberately separate from payment success
    * (see the Step 2 spec: dispatch-based deduction, not payment-based).
    */
-  async consumeReservation(reservationId: string) {
+  async consumeReservation(reservationId: string, performedBy = 'SYSTEM') {
     return this.prisma.$transaction(async (tx) => {
       const existing = await tx.stockReservation.findUnique({ where: { id: reservationId } });
       if (!existing) {
@@ -208,7 +223,7 @@ export class InventoryService {
           reason: reservation.orderId
             ? `Dispatched for order ${reservation.orderId}`
             : 'Manual consumption',
-          performedBy: 'SYSTEM',
+          performedBy,
         },
       });
 
@@ -222,7 +237,7 @@ export class InventoryService {
       dto.quantity,
       InventoryTransactionType.RECEIVE,
       dto.reason,
-      dto.performedBy,
+      dto.performedBy ?? 'SYSTEM',
     );
   }
 
@@ -232,7 +247,7 @@ export class InventoryService {
       dto.quantityDelta,
       InventoryTransactionType.ADJUSTMENT,
       dto.reason,
-      dto.performedBy,
+      dto.performedBy ?? 'SYSTEM',
     );
   }
 
@@ -242,7 +257,7 @@ export class InventoryService {
       -dto.quantity,
       InventoryTransactionType.DAMAGE,
       dto.reason,
-      dto.performedBy,
+      dto.performedBy ?? 'SYSTEM',
     );
   }
 
@@ -252,57 +267,64 @@ export class InventoryService {
       dto.quantity,
       InventoryTransactionType.RETURN,
       dto.reason,
-      dto.performedBy,
+      dto.performedBy ?? 'SYSTEM',
       dto.orderId,
     );
   }
 
   /**
    * Finds reservations sitting at ACTIVE past their expiry and formally
-   * flips them to EXPIRED, writing the audit entry. Manually triggered for
-   * now — there's no scheduler yet — but correctness never depended on
-   * this running: getActiveReservedQuantity() already excludes anything
-   * past expiresAt regardless of its stored status.
+   * flips them to EXPIRED, writing the audit entry. Runs automatically via
+   * @Cron every 2 minutes or manually via endpoint.
    */
+  @Cron('*/2 * * * *')
   async expireStaleReservations() {
-    const stale = await this.prisma.stockReservation.findMany({
-      where: { status: 'ACTIVE', expiresAt: { lte: new Date() } },
-    });
-
-    let expiredCount = 0;
-    for (const reservation of stale) {
-      await this.prisma.$transaction(async (tx) => {
-        const updateResult = await tx.stockReservation.updateMany({
-          where: { id: reservation.id, status: 'ACTIVE' },
-          data: { status: 'EXPIRED' },
-        });
-        if (updateResult.count === 0) {
-          return;
-        }
-
-        const [inventory, stillReserved] = await Promise.all([
-          tx.inventory.findUniqueOrThrow({ where: { variantId: reservation.variantId } }),
-          this.getActiveReservedQuantity(reservation.variantId, tx),
-        ]);
-
-        await tx.inventoryTransaction.create({
-          data: {
-            variantId: reservation.variantId,
-            reservationId: reservation.id,
-            orderId: reservation.orderId,
-            type: InventoryTransactionType.EXPIRED,
-            reservedDelta: -reservation.quantity,
-            balanceOnHandAfter: inventory.quantityOnHand,
-            balanceReservedAfter: stillReserved,
-            reason: 'Reservation hold expired without payment/dispatch',
-            performedBy: 'SYSTEM (cleanup)',
-          },
-        });
+    try {
+      const stale = await this.prisma.stockReservation.findMany({
+        where: { status: 'ACTIVE', expiresAt: { lte: new Date() } },
       });
-      expiredCount += 1;
-    }
 
-    return { expiredCount };
+      let expiredCount = 0;
+      for (const reservation of stale) {
+        await this.prisma.$transaction(async (tx) => {
+          const updateResult = await tx.stockReservation.updateMany({
+            where: { id: reservation.id, status: 'ACTIVE' },
+            data: { status: 'EXPIRED' },
+          });
+          if (updateResult.count === 0) {
+            return;
+          }
+
+          const [inventory, stillReserved] = await Promise.all([
+            tx.inventory.findUniqueOrThrow({ where: { variantId: reservation.variantId } }),
+            this.getActiveReservedQuantity(reservation.variantId, tx),
+          ]);
+
+          await tx.inventoryTransaction.create({
+            data: {
+              variantId: reservation.variantId,
+              reservationId: reservation.id,
+              orderId: reservation.orderId,
+              type: InventoryTransactionType.EXPIRED,
+              reservedDelta: -reservation.quantity,
+              balanceOnHandAfter: inventory.quantityOnHand,
+              balanceReservedAfter: stillReserved,
+              reason: 'Reservation hold expired without payment/dispatch',
+              performedBy: 'SYSTEM (cleanup)',
+            },
+          });
+        });
+        expiredCount += 1;
+      }
+
+      if (expiredCount > 0) {
+        this.logger.log(`Expired ${expiredCount} stale stock reservation(s)`);
+      }
+
+      return { expiredCount };
+    } catch (error) {
+      this.logger.error(`Error expiring stale reservations: ${(error as Error).message}`);
+    }
   }
 
   private async getActiveReservedQuantity(variantId: string, client: DbClient = this.prisma) {

@@ -14,12 +14,15 @@ jest.mock('@nestjs/jwt', () => ({ JwtService: jest.fn() }));
 const { JwtService } = require('@nestjs/jwt');
 
 const mockPrismaService = {
-  otpRequest: { create: jest.fn(), findFirst: jest.fn(), update: jest.fn() },
-  customer: { upsert: jest.fn() },
+  otpRequest: { create: jest.fn(), findFirst: jest.fn(), update: jest.fn(), deleteMany: jest.fn() },
+  customer: { upsert: jest.fn(), findUnique: jest.fn() },
   staffUser: { count: jest.fn(), create: jest.fn(), findUnique: jest.fn() },
 };
 
-const mockJwtService = { signAsync: jest.fn().mockResolvedValue('signed-token') };
+const mockJwtService = {
+  signAsync: jest.fn().mockResolvedValue('signed-token'),
+  verifyAsync: jest.fn().mockResolvedValue({}),
+};
 
 const mockSmsService = { isConfigured: jest.fn(), sendOtp: jest.fn() };
 
@@ -105,6 +108,73 @@ describe('AuthService', () => {
         expect.any(Number),
       );
       expect(result).not.toHaveProperty('devOnlyOtp');
+    });
+  });
+
+  describe('verifyOtp', () => {
+    it('returns both accessToken and refreshToken on successful OTP verification', async () => {
+      const code = '123456';
+      const codeHash = createHash('sha256').update(code).digest('hex');
+
+      mockPrismaService.otpRequest.findFirst.mockResolvedValue({
+        id: 'otp_1',
+        phone: '9876543210',
+        codeHash,
+        attempts: 0,
+      });
+      mockPrismaService.otpRequest.update.mockResolvedValue({});
+      mockPrismaService.customer.upsert.mockResolvedValue({
+        id: 'cust_1',
+        phone: '9876543210',
+        isPhoneVerified: true,
+      });
+
+      const result = await service.verifyOtp('9876543210', code);
+
+      expect(result).toHaveProperty('accessToken');
+      expect(result).toHaveProperty('refreshToken');
+      expect(result.customer.id).toBe('cust_1');
+    });
+  });
+
+  describe('refreshToken & logout', () => {
+    it('issues new access and refresh tokens for valid customer refresh token', async () => {
+      mockJwtService.verifyAsync = jest.fn().mockResolvedValue({
+        sub: 'cust_1',
+        type: 'customer',
+        isRefreshToken: true,
+      });
+      mockPrismaService.customer.findUnique = jest.fn().mockResolvedValue({
+        id: 'cust_1',
+        phone: '9876543210',
+      });
+
+      const result = await service.refreshToken('valid-refresh-token');
+
+      expect(result).toHaveProperty('accessToken');
+      expect(result).toHaveProperty('refreshToken');
+      expect(result.user).toHaveProperty('id', 'cust_1');
+    });
+
+    it('blacklists a token on logout', async () => {
+      const token = 'token-to-invalidate';
+      expect(service.isTokenRevoked(token)).toBe(false);
+
+      const logoutResult = service.logout(token);
+
+      expect(logoutResult).toEqual({ message: 'Logged out successfully' });
+      expect(service.isTokenRevoked(token)).toBe(true);
+    });
+  });
+
+  describe('purgeExpiredOtps', () => {
+    it('deletes expired and consumed OTP records', async () => {
+      mockPrismaService.otpRequest.deleteMany = jest.fn().mockResolvedValue({ count: 5 });
+
+      const result = await service.purgeExpiredOtps();
+
+      expect(mockPrismaService.otpRequest.deleteMany).toHaveBeenCalled();
+      expect(result).toEqual({ purgedCount: 5 });
     });
   });
 });

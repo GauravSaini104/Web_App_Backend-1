@@ -6,28 +6,33 @@ import {
   HttpCode,
   HttpStatus,
   Post,
+  Req,
   UseGuards,
 } from '@nestjs/common';
+import { Request } from 'express';
 import { AuthService } from './auth.service';
 import { RequestOtpDto } from './dto/request-otp.dto';
 import { VerifyOtpDto } from './dto/verify-otp.dto';
 import { StaffRegisterDto } from './dto/staff-register.dto';
 import { StaffLoginDto } from './dto/staff-login.dto';
+import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { OtpRateLimitGuard } from './guards/otp-rate-limit.guard';
 import { CurrentUser } from './decorators/current-user.decorator';
 import { AuthenticatedUser } from './strategies/jwt.strategy';
 
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly authService: AuthService) { }
+  constructor(private readonly authService: AuthService) {}
 
-  @Post('customer/request-otp')
+  @Post(['customer/request-otp', 'otp/request'])
+  @UseGuards(OtpRateLimitGuard)
   @HttpCode(HttpStatus.OK)
   requestOtp(@Body() dto: RequestOtpDto) {
     return this.authService.requestOtp(dto.phone);
   }
 
-  @Post('customer/verify-otp')
+  @Post(['customer/verify-otp', 'otp/verify'])
   @HttpCode(HttpStatus.OK)
   verifyOtp(@Body() dto: VerifyOtpDto) {
     return this.authService.verifyOtp(dto.phone, dto.code);
@@ -45,6 +50,20 @@ export class AuthController {
   @HttpCode(HttpStatus.OK)
   staffLogin(@Body() dto: StaffLoginDto) {
     return this.authService.staffLogin(dto);
+  }
+
+  @Post('refresh')
+  @HttpCode(HttpStatus.OK)
+  refresh(@Body() dto: RefreshTokenDto) {
+    return this.authService.refreshToken(dto.refreshToken);
+  }
+
+  @Post('logout')
+  @HttpCode(HttpStatus.OK)
+  logout(@Req() req: Request) {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
+    return this.authService.logout(token);
   }
 
   @Get('me')

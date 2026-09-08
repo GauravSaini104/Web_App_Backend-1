@@ -31,15 +31,21 @@ export class CartService {
           .getInventory(item.variantId)
           .catch(() => null);
         const sellingPrice = Number(item.variant.sellingPrice);
+        const mrp = Number(item.variant.mrp);
         const isAvailable =
           item.variant.product.isActive &&
           item.variant.isActive &&
           (inventory?.isSellable ?? false);
+        const lineTotal = Number((sellingPrice * item.quantity).toFixed(2));
+        const lineSavings = Number(Math.max(0, (mrp - sellingPrice) * item.quantity).toFixed(2));
+        const resolvedImageUrl =
+          item.variant.imageUrl || item.variant.product.imageUrl || null;
 
         return {
           id: item.id,
           variantId: item.variantId,
           quantity: item.quantity,
+          imageUrl: resolvedImageUrl,
           product: {
             id: item.variant.product.id,
             name: item.variant.product.name,
@@ -53,9 +59,11 @@ export class CartService {
             unit: item.variant.unit,
             weight: item.variant.weight,
             sellingPrice,
-            mrp: Number(item.variant.mrp),
+            mrp,
+            imageUrl: item.variant.imageUrl ?? null,
           },
-          lineTotal: Number((sellingPrice * item.quantity).toFixed(2)),
+          lineTotal,
+          lineSavings,
           availableStock: inventory?.available ?? 0,
           isAvailable,
         };
@@ -65,8 +73,18 @@ export class CartService {
     const grandTotal = Number(
       enrichedItems.reduce((sum, item) => sum + item.lineTotal, 0).toFixed(2),
     );
+    const totalMrp = Number(
+      enrichedItems.reduce((sum, item) => sum + item.variant.mrp * item.quantity, 0).toFixed(2),
+    );
+    const totalSavings = Number(Math.max(0, totalMrp - grandTotal).toFixed(2));
 
-    return { items: enrichedItems, itemCount: enrichedItems.length, grandTotal };
+    return {
+      items: enrichedItems,
+      itemCount: enrichedItems.length,
+      grandTotal,
+      totalMrp,
+      totalSavings,
+    };
   }
 
   /**

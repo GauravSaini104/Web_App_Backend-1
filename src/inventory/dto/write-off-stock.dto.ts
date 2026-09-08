@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsInt, IsPositive, IsString, MaxLength, MinLength } from 'class-validator';
+import { IsInt, IsOptional, IsPositive, IsString, MaxLength, MinLength } from 'class-validator';
 
 /**
  * Removes stock that can no longer be sold — damaged in transit, spoiled,
@@ -18,8 +18,8 @@ export class WriteOffStockDto {
   @MaxLength(500)
   reason!: string;
 
+  @IsOptional()
   @IsString()
-  @MinLength(1)
   @MaxLength(100)
-  performedBy!: string;
+  performedBy?: string;
 }

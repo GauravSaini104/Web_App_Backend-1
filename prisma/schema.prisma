@@ -132,6 +132,7 @@ model Product {
   categoryId String
 
   imageUrl  String?
+  images    String[] @default([])
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -164,6 +165,8 @@ model ProductVariant {
   unit   UnitOfMeasure
   weight Decimal       @db.Decimal(10, 3)
 
+  imageUrl  String?
+  images    String[] @default([])
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -223,6 +226,8 @@ enum OrderStatus {
 enum PaymentMethod {
   UPI
   CASH // covers both cash-on-delivery and cash-at-pickup
+  CARD
+  NETBANKING
 }
 
 enum FulfillmentMethod {
@@ -237,7 +242,7 @@ model Order {
   id          String @id @default(cuid())
   // A short, human-friendly number for staff/customer conversations
   // ("order #1042"), separate from the internal id.
-  orderNumber Int    @unique @default(autoincrement())
+  orderNumber Int    @unique @default(autoincrement())   
 
   customerId String
   customer   Customer @relation(fields: [customerId], references: [id], onDelete: Restrict)

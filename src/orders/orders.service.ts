@@ -1,8 +1,18 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Inject,
+  Injectable,
+  Logger,
+  NotFoundException,
+  forwardRef,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { FulfillmentMethod, OrderStatus, PaymentMethod } from '@prisma/client';
+import { Cron } from '@nestjs/schedule';
+import { FulfillmentMethod, OrderStatus, PaymentMethod, Prisma } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { InventoryService } from '../inventory/inventory.service';
+import { SmsService } from '../auth/sms.service';
+import { PaymentsService } from '../payments/payments.service';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { CancelOrderDto } from './dto/cancel-order.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
@@ -14,10 +24,15 @@ const ORDER_INCLUDE_WITH_CUSTOMER = { items: true, customer: true } as const;
 
 @Injectable()
 export class OrdersService {
+  private readonly logger = new Logger(OrdersService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly inventoryService: InventoryService,
     private readonly configService: ConfigService,
+    private readonly smsService: SmsService,
+    @Inject(forwardRef(() => PaymentsService))
+    private readonly paymentsService: PaymentsService,
   ) {}
 
   /**
@@ -167,8 +182,58 @@ export class OrdersService {
   }
 
   async findAllForStaff(query: QueryOrdersDto) {
+    const where: Prisma.OrderWhereInput = {
+      ...(query.status && { status: query.status }),
+      ...((query.startDate || query.endDate) && {
+        createdAt: {
+          ...(query.startDate && { gte: new Date(query.startDate) }),
+          ...(query.endDate && { lte: new Date(query.endDate) }),
+        },
+      }),
+      ...((query.minAmount !== undefined || query.maxAmount !== undefined) && {
+        subtotal: {
+          ...(query.minAmount !== undefined && { gte: query.minAmount }),
+          ...(query.maxAmount !== undefined && { lte: query.maxAmount }),
+        },
+      }),
+      ...(query.search && {
+        OR: [
+          ...(Number.isInteger(Number(query.search)) && !isNaN(Number(query.search))
+            ? [{ orderNumber: Number(query.search) }]
+            : []),
+          { customer: { phone: { contains: query.search } } },
+          { customer: { name: { contains: query.search, mode: 'insensitive' as const } } },
+        ],
+      }),
+    };
+
+    const page = query.page;
+    const limit = query.limit;
+
+    if (page && limit) {
+      const [items, total] = await this.prisma.$transaction([
+        this.prisma.order.findMany({
+          where,
+          include: ORDER_INCLUDE_WITH_CUSTOMER,
+          orderBy: { createdAt: 'desc' },
+          skip: (page - 1) * limit,
+          take: limit,
+        }),
+        this.prisma.order.count({ where }),
+      ]);
+      return {
+        items: items.map((order) => this.withTotal(order)),
+        meta: {
+          total,
+          page,
+          limit,
+          totalPages: Math.ceil(total / limit) || 1,
+        },
+      };
+    }
+
     const orders = await this.prisma.order.findMany({
-      where: query.status ? { status: query.status } : undefined,
+      where,
       include: ORDER_INCLUDE_WITH_CUSTOMER,
       orderBy: { createdAt: 'desc' },
     });
@@ -205,6 +270,9 @@ export class OrdersService {
       where: { id: orderId },
       data: { status: OrderStatus.CONFIRMED },
     });
+
+    await this.notifyCustomerOrderStatus(orderId, OrderStatus.CONFIRMED);
+
     return this.withTotal(updated);
   }
 
@@ -227,6 +295,9 @@ export class OrdersService {
       where: { id: orderId },
       data: { status: dto.status },
     });
+
+    await this.notifyCustomerOrderStatus(orderId, dto.status);
+
     return this.withTotal(updated);
   }
 
@@ -234,31 +305,38 @@ export class OrdersService {
    * A UPI order abandoned mid-checkout would otherwise sit at
    * PENDING_PAYMENT forever — its stock reservation already lazily stops
    * counting once expired (see Inventory), but the order record itself
-   * needs an explicit push. Manually triggered for now, same as
-   * Inventory's own cleanup — no scheduler exists yet, but correctness
-   * doesn't depend on this running promptly, only on it running eventually.
+   * needs an explicit push. Runs automatically via @Cron every 5 minutes.
    */
+  @Cron('*/5 * * * *')
   async expireAbandonedOrders() {
-    const candidates = await this.prisma.order.findMany({
-      where: { status: OrderStatus.PENDING_PAYMENT },
-      include: { stockReservations: true },
-    });
+    try {
+      const candidates = await this.prisma.order.findMany({
+        where: { status: OrderStatus.PENDING_PAYMENT },
+        include: { stockReservations: true },
+      });
 
-    let cancelledCount = 0;
-    for (const order of candidates) {
-      const stillHeld = order.stockReservations.some(
-        (reservation) => reservation.status === 'ACTIVE' && reservation.expiresAt > new Date(),
-      );
-      if (!stillHeld) {
-        await this.performCancellation(
-          order.id,
-          'Payment window expired — order automatically cancelled',
+      let cancelledCount = 0;
+      for (const order of candidates) {
+        const stillHeld = order.stockReservations.some(
+          (reservation) => reservation.status === 'ACTIVE' && reservation.expiresAt > new Date(),
         );
-        cancelledCount += 1;
+        if (!stillHeld) {
+          await this.performCancellation(
+            order.id,
+            'Payment window expired — order automatically cancelled',
+          );
+          cancelledCount += 1;
+        }
       }
-    }
 
-    return { cancelledCount };
+      if (cancelledCount > 0) {
+        this.logger.log(`Expired ${cancelledCount} abandoned order(s)`);
+      }
+
+      return { cancelledCount };
+    } catch (error) {
+      this.logger.error(`Error expiring abandoned orders: ${(error as Error).message}`);
+    }
   }
 
   /** Lets the checkout screen preview the real fee/threshold before placing the order. */
@@ -281,7 +359,7 @@ export class OrdersService {
     return Number(this.configService.get<string>('DELIVERY_FEE') ?? 0);
   }
 
-  /** Releases every active reservation tied to this order, then marks it cancelled. */
+  /** Releases every active reservation tied to this order, marks it cancelled, triggers refund if paid, and sends alert. */
   private async performCancellation(orderId: string, reason: string) {
     const updated = await this.prisma.$transaction(async (tx) => {
       const activeReservations = await tx.stockReservation.findMany({
@@ -296,7 +374,34 @@ export class OrdersService {
         data: { status: OrderStatus.CANCELLED, cancelledAt: new Date(), cancelReason: reason },
       });
     });
+
+    // Check if order had successful online payment to trigger refund
+    try {
+      await this.paymentsService.refundPayment(orderId, reason);
+    } catch (err) {
+      this.logger.error(`Refund error on cancelling order ${orderId}: ${(err as Error).message}`);
+    }
+
+    await this.notifyCustomerOrderStatus(orderId, OrderStatus.CANCELLED);
+
     return this.withTotal(updated);
+  }
+
+  private async notifyCustomerOrderStatus(orderId: string, status: OrderStatus) {
+    try {
+      const order = await this.prisma.order.findUnique({
+        where: { id: orderId },
+        include: { customer: true },
+      });
+      if (order?.customer?.phone) {
+        const message = `Your CD Shopping Hub order #${order.orderNumber} is now ${status}. Thank you for shopping with us!`;
+        await this.smsService.sendMessage(order.customer.phone, message);
+      }
+    } catch (error) {
+      this.logger.error(
+        `Failed to send status notification for order ${orderId}: ${(error as Error).message}`,
+      );
+    }
   }
 
   /** subtotal and deliveryFee are both frozen at creation, so this can never drift. */

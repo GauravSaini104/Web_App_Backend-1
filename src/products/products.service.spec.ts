@@ -84,6 +84,41 @@ describe('ProductsService', () => {
       await expect(service.create(invalidDto as any)).rejects.toThrow(BadRequestException);
       expect(mockPrismaService.product.create).not.toHaveBeenCalled();
     });
+
+    it('handles uploaded files and formats imageUrl and images with BASE_URL', async () => {
+      const dto = {
+        name: 'Tata Salt',
+        categoryId: 'cat_1',
+        variants: [{ sku: 'SALT-1KG', mrp: 28, sellingPrice: 25, unit: 'KG', weight: 1 }],
+      };
+      const files = [
+        { fieldname: 'images', filename: 'photo1.jpg' },
+        { fieldname: 'images', filename: 'photo2.jpg' },
+      ] as any;
+
+      mockPrismaService.product.create.mockImplementation(({ data }) =>
+        Promise.resolve({
+          id: 'prod_1',
+          ...data,
+          variants: [{ id: 'var_1', sku: 'SALT-1KG', mrp: 28, sellingPrice: 25, unit: 'KG', weight: 1 }],
+        }),
+      );
+
+      const result = await service.create(dto as any, files);
+
+      expect(mockPrismaService.product.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            imageUrl: expect.stringContaining('/uploads/products/photo1.jpg'),
+            images: [
+              expect.stringContaining('/uploads/products/photo1.jpg'),
+              expect.stringContaining('/uploads/products/photo2.jpg'),
+            ],
+          }),
+        }),
+      );
+      expect(result.imageUrl).toContain('/uploads/products/photo1.jpg');
+    });
   });
 
   describe('findOne', () => {

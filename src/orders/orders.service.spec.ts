@@ -27,9 +27,22 @@ const mockPrismaService = {
   $transaction: jest.fn((callback: (tx: typeof mockTx) => unknown) => callback(mockTx)),
 };
 
+import { SmsService } from '../auth/sms.service';
+import { PaymentsService } from '../payments/payments.service';
+
 const mockInventoryService = {
   reserveStockTx: jest.fn(),
   releaseReservationTx: jest.fn(),
+};
+
+const mockSmsService = {
+  sendOtp: jest.fn().mockResolvedValue(undefined),
+  sendMessage: jest.fn().mockResolvedValue(undefined),
+  isConfigured: jest.fn().mockReturnValue(false),
+};
+
+const mockPaymentsService = {
+  refundPayment: jest.fn().mockResolvedValue({ refunded: true }),
 };
 
 function cartItem(overrides: Partial<any> = {}) {
@@ -66,6 +79,8 @@ describe('OrdersService', () => {
         { provide: PrismaService, useValue: mockPrismaService },
         { provide: InventoryService, useValue: mockInventoryService },
         { provide: ConfigService, useValue: mockConfigService },
+        { provide: SmsService, useValue: mockSmsService },
+        { provide: PaymentsService, useValue: mockPaymentsService },
       ],
     }).compile();
 

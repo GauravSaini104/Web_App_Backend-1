@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
+import { BodyKeyTrimmerInterceptor } from './common/interceptors/body-key-trimmer.interceptor';
 
 async function bootstrap() {
   // rawBody: true preserves the exact request bytes alongside the parsed
@@ -35,7 +36,7 @@ async function bootstrap() {
 
   // Converts uncaught/HTTP errors into one consistent JSON shape.
   app.useGlobalFilters(new HttpExceptionFilter());
-  app.useGlobalInterceptors(new TransformInterceptor());
+  app.useGlobalInterceptors(new BodyKeyTrimmerInterceptor(), new TransformInterceptor());
 
   const corsOrigins = (configService.get<string>('CORS_ORIGINS') ?? '')
     .split(',')

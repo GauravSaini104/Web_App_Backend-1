@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsInt, IsString, MaxLength, MinLength, NotEquals } from 'class-validator';
+import { IsInt, IsOptional, IsString, MaxLength, MinLength, NotEquals } from 'class-validator';
 
 /** For correcting stock counts after a manual physical count. */
 export class AdjustStockDto {
@@ -13,8 +13,8 @@ export class AdjustStockDto {
   @MaxLength(500)
   reason!: string;
 
+  @IsOptional()
   @IsString()
-  @MinLength(1)
   @MaxLength(100)
-  performedBy!: string;
+  performedBy?: string;
 }

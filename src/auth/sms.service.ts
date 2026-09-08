@@ -34,9 +34,18 @@ export class SmsService {
   }
 
   async sendOtp(phone: string, code: string, expiryMinutes: number): Promise<void> {
-    const apiKey = this.configService.get<string>('FAST2SMS_API_KEY')!.trim();
     const message = `Your OTP is ${code}. It is valid for ${expiryMinutes} minutes. Do not share this code with anyone.`;
+    return this.sendMessage(phone, message);
+  }
 
+  async sendMessage(phone: string, message: string): Promise<void> {
+    const rawApiKey = this.configService.get<string>('FAST2SMS_API_KEY')?.trim();
+    if (!rawApiKey) {
+      this.logger.log(`[DEV SMS] To ${phone}: ${message}`);
+      return;
+    }
+
+    const apiKey = rawApiKey;
     const url = new URL('https://www.fast2sms.com/dev/bulkV2');
     url.searchParams.set('authorization', apiKey);
     url.searchParams.set('route', 'q');
@@ -57,12 +66,12 @@ export class SmsService {
     }
 
     if (!response.ok || !body.return) {
-      this.logger.error(`Fast2SMS failed to send OTP to ${phone}: ${JSON.stringify(body)}`);
+      this.logger.error(`Fast2SMS failed to send SMS to ${phone}: ${JSON.stringify(body)}`);
       throw new Error(
         `Fast2SMS rejected the request: ${Array.isArray(body.message) ? body.message.join(', ') : (body.message ?? 'unknown error')}`,
       );
     }
 
-    this.logger.log(`OTP sent via Fast2SMS to ${phone} (request_id=${body.request_id ?? 'n/a'})`);
+    this.logger.log(`SMS sent via Fast2SMS to ${phone} (request_id=${body.request_id ?? 'n/a'})`);
   }
 }
