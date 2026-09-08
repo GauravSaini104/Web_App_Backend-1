@@ -18,12 +18,12 @@ export const PRODUCT_UPLOAD_DIR = join(process.cwd(), 'uploads', 'products');
 mkdirSync(PRODUCT_UPLOAD_DIR, { recursive: true });
 
 /**
- * Builds the absolute publicly accessible URL for an uploaded file using BASE_URL from .env
+ * Returns the configured base URL from .env (e.g. `http://72.62.228.103:3000`),
+ * with fallbacks for request host or localhost if unset.
  */
-export function getFullImageUrl(filename: string, req?: Request): string {
+export function getBaseUrl(req?: Request): string {
   if (process.env.BASE_URL) {
-    const baseUrl = process.env.BASE_URL.replace(/\/$/, '');
-    return `${baseUrl}/uploads/products/${filename}`;
+    return process.env.BASE_URL.trim().replace(/\/+$/, '');
   }
   if (req) {
     const host = req.get('host') || 'localhost:3000';
@@ -31,9 +31,17 @@ export function getFullImageUrl(filename: string, req?: Request): string {
     const protocol = isLocalhost
       ? 'http'
       : (req.headers['x-forwarded-proto'] as string) || req.protocol || 'https';
-    return `${protocol}://${host}/uploads/products/${filename}`;
+    return `${protocol}://${host}`;
   }
-  return `http://localhost:3000/uploads/products/${filename}`;
+  return 'http://localhost:3000';
+}
+
+/**
+ * Builds the absolute publicly accessible URL for an uploaded file using BASE_URL from .env
+ */
+export function getFullImageUrl(filename: string, req?: Request): string {
+  const baseUrl = getBaseUrl(req);
+  return `${baseUrl}/uploads/products/${filename}`;
 }
 
 export const PRODUCT_MULTER_OPTIONS = {

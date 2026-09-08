@@ -20,6 +20,7 @@ const FIELD_LABELS: Record<string, string> = {
  * found, P2003 = foreign key constraint violation (e.g. deleting a
  * category that still has products).
  */     
+
 export function handlePrismaError(error: unknown, entityName: string): never {
   if (error instanceof Prisma.PrismaClientKnownRequestError) {
     if (error.code === 'P2002') {

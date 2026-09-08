@@ -11,13 +11,13 @@ import { QueryProductDto } from './dto/query-product.dto';
 import { CreateProductVariantDto } from './dto/create-product-variant.dto';
 import { UpdateProductVariantDto } from './dto/update-product-variant.dto';
 import { DEFAULT_LOW_STOCK_THRESHOLD } from '../inventory/inventory.constants';
-import { getFullImageUrl } from '../uploads/uploads.config';
+import { getBaseUrl, getFullImageUrl } from '../uploads/uploads.config';
 
 const PRODUCT_INCLUDE = { brand: true, category: true, variants: true } as const;
 
 export function formatImageUrl(url: string | null | undefined): string | null {
   if (!url) return null;
-  const baseUrl = (process.env.BASE_URL || 'http://localhost:3000').replace(/\/$/, '');
+  const baseUrl = getBaseUrl();
 
   if (url.startsWith('data:')) {
     return url;
@@ -43,7 +43,7 @@ export function formatImageUrl(url: string | null | undefined): string | null {
 
 @Injectable()
 export class ProductsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) { }
 
   private formatProduct<T extends Record<string, any>>(product: T): T {
     if (!product) return product;
