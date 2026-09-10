@@ -18,8 +18,7 @@ import { StaffAuthGuard } from '../auth/guards/staff-auth.guard';
 @Controller('categories')
 export class CategoriesController {
   constructor(private readonly categoriesService: CategoriesService) {}
-
-  // Browsing the catalog stays public — customers need this with no login.
+                       
   @Get()
   findAll() {
     return this.categoriesService.findAll();

@@ -32,8 +32,15 @@ export function handlePrismaError(error: unknown, entityName: string): never {
       throw new NotFoundException(`${entityName} not found`);
     }
     if (error.code === 'P2003') {
+      const field = (error.meta?.field_name as string) || '';
+      if (field.includes('categoryId')) {
+        throw new ConflictException('The specified Category does not exist in the database');
+      }
+      if (field.includes('brandId')) {
+        throw new ConflictException('The specified Brand does not exist in the database');
+      }
       throw new ConflictException(
-        `Cannot delete this ${entityName} because other records still reference it`,
+        `Cannot complete operation on ${entityName} because a referenced record does not exist or other records still reference it`,
       );
     }
   }

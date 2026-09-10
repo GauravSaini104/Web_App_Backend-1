@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { InventoryTransactionType, Prisma, UnitOfMeasure } from '@prisma/client';
 import { Request } from 'express';
+import * as xlsx from 'xlsx';
 import { PrismaService } from '../database/prisma.service';
 import { slugify } from '../common/utils/slugify';
 import { handlePrismaError } from '../common/utils/prisma-error.util';
@@ -10,6 +11,7 @@ import { UpdateProductDto } from './dto/update-product.dto';
 import { QueryProductDto } from './dto/query-product.dto';
 import { CreateProductVariantDto } from './dto/create-product-variant.dto';
 import { UpdateProductVariantDto } from './dto/update-product-variant.dto';
+import { BulkImportResult, BulkImportRowError } from './dto/bulk-import-product.dto';
 import { DEFAULT_LOW_STOCK_THRESHOLD } from '../inventory/inventory.constants';
 import { getBaseUrl, getFullImageUrl } from '../uploads/uploads.config';
 
@@ -399,6 +401,7 @@ export class ProductsService {
       }
     }
 
+    
     try {
       const updated = await this.prisma.productVariant.update({
         where: { id: variantId },
@@ -464,5 +467,414 @@ export class ProductsService {
     if (sellingPrice > mrp) {
       throw new BadRequestException('sellingPrice cannot be greater than mrp');
     }
+  }
+
+  /**
+   * Generates a sample CSV / Excel template for bulk product import.
+   */
+  generateBulkImportTemplate(format: 'xlsx' | 'csv' = 'xlsx') {
+    const sampleData = [
+      {
+        Name: 'Fortune Sunlite Refined Sunflower Oil',
+        Description: 'Rich in vitamins, unadulterated edible cooking oil',
+        SKU: 'FORT-SUN-1L',
+        MRP: 160.0,
+        SellingPrice: 145.0,
+        Unit: 'L',
+        Weight: 1.0,
+        InitialStock: 50,
+        ImageUrl: 'https://example.com/fortune-oil.jpg',
+        Images: 'https://example.com/fortune-1.jpg, https://example.com/fortune-2.jpg',
+      },
+      {
+        Name: 'Tata Salt Vacuum Evaporated',
+        Description: 'Iodized salt with essential minerals',
+        SKU: 'TATA-SALT-1KG',
+        MRP: 30.0,
+        SellingPrice: 28.0,
+        Unit: 'KG',
+        Weight: 1.0,
+        InitialStock: 100,
+        ImageUrl: 'https://example.com/tata-salt.jpg',
+        Images: '',
+      },
+      {
+        Name: 'Aashirvaad Superior MP Sharbati Atta',
+        Description: '100% pure whole wheat flour',
+        SKU: 'AASH-ATTA-5KG',
+        MRP: 280.0,
+        SellingPrice: 260.0,
+        Unit: 'KG',
+        Weight: 5.0,
+        InitialStock: 40,
+        ImageUrl: 'https://example.com/aashirvaad-atta.jpg',
+        Images: '',
+      },
+    ];
+
+    const worksheet = xlsx.utils.json_to_sheet(sampleData);
+    const workbook = xlsx.utils.book_new();
+    xlsx.utils.book_append_sheet(workbook, worksheet, 'Products');
+
+    if (format === 'csv') {
+      const csvOutput = xlsx.utils.sheet_to_csv(worksheet);
+      return {
+        buffer: Buffer.from(csvOutput, 'utf-8'),
+        mimeType: 'text/csv',
+        filename: 'products_bulk_import_template.csv',
+      };
+    }
+
+    const excelBuffer = xlsx.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+    return {
+      buffer: excelBuffer,
+      mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      filename: 'products_bulk_import_template.xlsx',
+    };
+  }
+
+  private normalizeUnit(rawUnit: any): UnitOfMeasure {
+    if (!rawUnit) return UnitOfMeasure.PCS;
+    const clean = String(rawUnit).trim().toUpperCase();
+    if (clean === 'G' || clean === 'GM' || clean === 'GRAM' || clean === 'GRAMS') {
+      return UnitOfMeasure.G;
+    }
+    if (clean === 'KG' || clean === 'KILO' || clean === 'KILOGRAM' || clean === 'KILOGRAMS') {
+      return UnitOfMeasure.KG;
+    }
+    if (clean === 'ML' || clean === 'MILLILITER' || clean === 'MILLILITRE') {
+      return UnitOfMeasure.ML;
+    }
+    if (
+      clean === 'L' ||
+      clean === 'LT' ||
+      clean === 'LTR' ||
+      clean === 'LITER' ||
+      clean === 'LITRE' ||
+      clean === 'LITERS' ||
+      clean === 'LITRES'
+    ) {
+      return UnitOfMeasure.L;
+    }
+    if (
+      clean === 'PCS' ||
+      clean === 'PC' ||
+      clean === 'PIECE' ||
+      clean === 'PIECES' ||
+      clean === 'PKT' ||
+      clean === 'PACKET' ||
+      clean === 'BOX' ||
+      clean === 'CAN' ||
+      clean === 'BOTTLE' ||
+      clean === 'UNIT'
+    ) {    
+      return UnitOfMeasure.PCS;
+    }
+    if (Object.values(UnitOfMeasure).includes(clean as any)) {
+      return clean as UnitOfMeasure;
+    }
+    throw new Error(`Invalid unit '${rawUnit}'. Supported units are G, KG, ML, L, PCS.`);
+  }
+
+  private getRowField(row: Record<string, any>, ...fieldAliases: string[]): any {
+    const keys = Object.keys(row);
+    for (const alias of fieldAliases) {
+      const target = alias.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const matchKey = keys.find(
+        (k) => k.toLowerCase().replace(/[^a-z0-9]/g, '') === target,
+      );
+      if (
+        matchKey !== undefined &&
+        row[matchKey] !== undefined &&
+        row[matchKey] !== null &&
+        String(row[matchKey]).trim() !== ''
+      ) {
+        return row[matchKey];
+      }
+    }
+    return undefined;
+  }
+
+  async bulkImport(
+    categoryId: string,
+    brandId?: string,
+    file?: Express.Multer.File,
+    rawProductsPayload?: any,
+    staffId?: string,
+  ): Promise<BulkImportResult> {
+    const category = await this.prisma.category.findUnique({ where: { id: categoryId } });
+    if (!category) {
+      throw new BadRequestException(`Category with ID '${categoryId}' not found`);
+    }
+
+    if (brandId) {
+      const brand = await this.prisma.brand.findUnique({ where: { id: brandId } });
+      if (!brand) {
+        throw new BadRequestException(`Brand with ID '${brandId}' not found`);
+      }
+    }
+
+
+    let rawRows: any[] = [];
+
+    if (file && file.buffer) {
+      try {
+        const workbook = xlsx.read(file.buffer, { type: 'buffer' });
+        const sheetName = workbook.SheetNames[0];
+        if (!sheetName) {
+          throw new BadRequestException('The uploaded file contains no sheets');
+        }
+        rawRows = xlsx.utils.sheet_to_json(workbook.Sheets[sheetName], { defval: '' });
+      } catch (err: any) {
+        throw new BadRequestException(`Failed to parse spreadsheet file: ${err.message}`);
+      }
+    } else if (rawProductsPayload) {
+      if (typeof rawProductsPayload === 'string') {
+        try {
+          rawRows = JSON.parse(rawProductsPayload);
+        } catch {
+          throw new BadRequestException('Invalid JSON provided in products payload');
+        }
+      } else if (Array.isArray(rawProductsPayload)) {
+        rawRows = rawProductsPayload;
+      }
+    }
+
+    if (!Array.isArray(rawRows) || rawRows.length === 0) {
+      throw new BadRequestException('No product rows found to import in file or payload');
+    }
+
+    const errors: BulkImportRowError[] = [];
+    const validRowsToInsert: any[] = [];
+    const incomingSkusInFile = new Set<string>();
+
+    for (let index = 0; index < rawRows.length; index++) {
+      const row = rawRows[index];
+      const rowNumber = index + 2; // Row 1 is header row in Excel/CSV
+
+      const name = this.getRowField(row, 'name', 'productName', 'product_name', 'title');
+      const sku = this.getRowField(row, 'sku', 'barcode', 'item_code', 'code');
+      const mrpRaw = this.getRowField(row, 'mrp', 'max_retail_price', 'retail_price');
+      const spRaw = this.getRowField(row, 'sellingPrice', 'selling_price', 'price', 'sp');
+      const unitRaw = this.getRowField(row, 'unit', 'uom', 'measure');
+      const weightRaw = this.getRowField(row, 'weight', 'size', 'pack_size', 'quantity');
+      const descRaw = this.getRowField(row, 'description', 'desc');
+      const initialStockRaw = this.getRowField(
+        row,
+        'initialStock',
+        'initial_stock',
+        'stock',
+        'qty',
+        'opening_stock',
+      );
+      const imageUrlRaw = this.getRowField(row, 'imageUrl', 'image_url', 'image', 'photo');
+      const imagesRaw = this.getRowField(row, 'images', 'photos', 'gallery');
+
+      if (!name) {
+        errors.push({ row: rowNumber, reason: 'Product Name is missing' });
+        continue;
+      }
+      if (!sku) {
+        errors.push({ row: rowNumber, name: String(name), reason: 'SKU / Barcode is missing' });
+        continue;
+      }
+
+      const formattedSku = String(sku).trim().toUpperCase();
+      if (incomingSkusInFile.has(formattedSku)) {
+        errors.push({
+          row: rowNumber,
+          sku: formattedSku,
+          name: String(name),
+          reason: `Duplicate SKU '${formattedSku}' found within the uploaded file`,
+        });
+        continue;
+      }
+      incomingSkusInFile.add(formattedSku);
+
+      const mrp = parseFloat(mrpRaw);
+      const sellingPrice = parseFloat(spRaw);
+      const weight = parseFloat(weightRaw);
+      const initialStock =
+        initialStockRaw !== undefined && initialStockRaw !== '' ? parseInt(initialStockRaw, 10) : 0;
+
+      if (isNaN(mrp) || mrp <= 0) {
+        errors.push({
+          row: rowNumber,
+          sku: formattedSku,
+          name: String(name),
+          reason: `Invalid MRP value '${mrpRaw}'`,
+        });
+        continue;
+      }
+      if (isNaN(sellingPrice) || sellingPrice <= 0) {
+        errors.push({
+          row: rowNumber,
+          sku: formattedSku,
+          name: String(name),
+          reason: `Invalid Selling Price value '${spRaw}'`,
+        });
+        continue;
+      }
+      if (sellingPrice > mrp) {
+        errors.push({
+          row: rowNumber,
+          sku: formattedSku,
+          name: String(name),
+          reason: `Selling price (${sellingPrice}) cannot exceed MRP (${mrp})`,
+        });
+        continue;
+      }
+      if (isNaN(weight) || weight <= 0) {
+        errors.push({
+          row: rowNumber,
+          sku: formattedSku,
+          name: String(name),
+          reason: `Invalid Weight value '${weightRaw}'`,
+        });
+        continue;
+      }
+
+      let unit: UnitOfMeasure;
+      try {
+        unit = this.normalizeUnit(unitRaw);
+      } catch (e: any) {
+        errors.push({ row: rowNumber, sku: formattedSku, name: String(name), reason: e.message });
+        continue;
+      }
+
+      let imageList: string[] = [];
+      if (imagesRaw) {
+        if (Array.isArray(imagesRaw)) {
+          imageList = imagesRaw.map(String).map((s) => s.trim()).filter(Boolean);
+        } else if (typeof imagesRaw === 'string') {
+          imageList = imagesRaw.split(/[,;|]/).map((s) => s.trim()).filter(Boolean);
+        }
+      }
+      if (imageUrlRaw && !imageList.includes(String(imageUrlRaw).trim())) {
+        imageList.unshift(String(imageUrlRaw).trim());
+      }
+      const primaryImageUrl =
+        imageList.length > 0 ? imageList[0] : imageUrlRaw ? String(imageUrlRaw).trim() : null;
+
+      validRowsToInsert.push({
+        rowNumber,
+        name: String(name).trim(),
+        description: descRaw ? String(descRaw).trim() : null,
+        sku: formattedSku,
+        mrp,
+        sellingPrice,
+        unit,
+        weight,
+        initialStock: isNaN(initialStock) || initialStock < 0 ? 0 : initialStock,
+        imageUrl: primaryImageUrl,
+        images: imageList,
+      });
+    }
+
+    if (validRowsToInsert.length > 0) {
+      const skus = validRowsToInsert.map((r) => r.sku);
+      const existingInDb = await this.prisma.productVariant.findMany({
+        where: { sku: { in: skus } },
+        select: { sku: true },
+      });
+      const dbSkuSet = new Set(existingInDb.map((v) => v.sku.toUpperCase()));
+
+      const finalInsertList: typeof validRowsToInsert = [];
+      for (const row of validRowsToInsert) {
+        if (dbSkuSet.has(row.sku)) {
+          errors.push({
+            row: row.rowNumber,
+            sku: row.sku,
+            name: row.name,
+            reason: `SKU '${row.sku}' already exists in database`,
+          });
+        } else {
+          finalInsertList.push(row);
+        }
+      }
+
+      const createdProducts: any[] = [];
+      for (const item of finalInsertList) {
+        try {
+          const baseSlug = slugify(item.name);
+          const slugCandidate = `${baseSlug}-${item.sku.toLowerCase().replace(/[^a-z0-9]/g, '-')}`;
+
+          const existingSlug = await this.prisma.product.findUnique({ where: { slug: baseSlug } });
+          const finalSlug = existingSlug ? slugCandidate : baseSlug;
+
+          const product = await this.prisma.product.create({
+            data: {
+              name: item.name,
+              slug: finalSlug,
+              description: item.description,
+              categoryId,
+              brandId: brandId || null,
+              imageUrl: item.imageUrl,
+              images: item.images,
+              isActive: true,
+              variants: {
+                create: {
+                  sku: item.sku,
+                  mrp: item.mrp,
+                  sellingPrice: item.sellingPrice,
+                  unit: item.unit,
+                  weight: item.weight,
+                  imageUrl: item.imageUrl,
+                  images: item.images,
+                  isActive: true,
+                  inventory: {
+                    create: {
+                      quantityOnHand: item.initialStock,
+                      isSellable: true,
+                    },
+                  },
+                },
+              },
+            },
+            include: PRODUCT_INCLUDE,
+          });
+
+          if (item.initialStock > 0 && product.variants[0]) {
+            await this.prisma.inventoryTransaction.create({
+              data: {
+                variantId: product.variants[0].id,
+                type: InventoryTransactionType.RECEIVE,
+                onHandDelta: item.initialStock,
+                reservedDelta: 0,
+                balanceOnHandAfter: item.initialStock,
+                balanceReservedAfter: 0,
+                reason: 'Initial bulk import stock',
+                performedBy: staffId || 'BULK_IMPORT',
+              },
+            });
+          }
+
+          createdProducts.push(this.formatProduct(product));
+        } catch (dbErr: any) {
+          errors.push({
+            row: item.rowNumber,
+            sku: item.sku,
+            name: item.name,
+            reason: dbErr.message || 'Failed to insert product into database',
+          });
+        }
+      }
+
+      return {
+        total: rawRows.length,
+        imported: createdProducts.length,
+        failed: errors.length,
+        errors,
+        products: createdProducts,
+      };
+    }
+
+    return {
+      total: rawRows.length,
+      imported: 0,
+      failed: errors.length,
+      errors,
+      products: [],
+    };
   }
 }
