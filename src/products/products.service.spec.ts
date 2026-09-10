@@ -260,6 +260,56 @@ describe('ProductsService', () => {
     });
   });
 
+  describe('uploadImages', () => {
+    it('uploads multiple images, formats full URLs using BASE_URL and updates product', async () => {
+      const existingProduct = {
+        id: 'prod_1',
+        imageUrl: null,
+        images: [],
+        variants: [],
+      };
+      mockPrismaService.product.findUnique.mockResolvedValue(existingProduct);
+      mockPrismaService.product.update.mockImplementation(({ data }) =>
+        Promise.resolve({ id: 'prod_1', ...data, variants: [] }),
+      );
+
+      const files = [
+        { filename: 'img1.jpg' },
+        { filename: 'img2.jpg' },
+      ] as any;
+
+      const result = await service.uploadImages('prod_1', files);
+
+      expect(mockPrismaService.product.findUnique).toHaveBeenCalledWith({ where: { id: 'prod_1' } });
+      expect(mockPrismaService.product.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'prod_1' },
+          data: expect.objectContaining({
+            imageUrl: expect.stringContaining('/uploads/products/img1.jpg'),
+            images: [
+              expect.stringContaining('/uploads/products/img1.jpg'),
+              expect.stringContaining('/uploads/products/img2.jpg'),
+            ],
+          }),
+        }),
+      );
+      expect(result.urls.length).toBe(2);
+      expect(result.product.images.length).toBe(2);
+    });
+
+    it('throws BadRequestException when no files are uploaded', async () => {
+      await expect(service.uploadImages('prod_1', [])).rejects.toThrow(BadRequestException);
+    });
+
+    it('throws NotFoundException when product does not exist', async () => {
+      mockPrismaService.product.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.uploadImages('missing_prod', [{ filename: 'test.jpg' }] as any),
+      ).rejects.toThrow(NotFoundException);
+    });
+  });
+
   describe('remove', () => {
     it('soft-deletes the product and all its variants instead of erasing rows', async () => {
       mockPrismaService.product.findUnique.mockResolvedValue({ id: 'prod_1', variants: [] });

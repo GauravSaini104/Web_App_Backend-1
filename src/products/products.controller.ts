@@ -129,6 +129,17 @@ export class ProductsController {
     return this.productsService.update(id, dto, files, req);
   }
 
+  @Post(':id/images')
+  @UseGuards(StaffAuthGuard)
+  @UseInterceptors(AnyFilesInterceptor(PRODUCT_MULTER_OPTIONS))
+  uploadImages(
+    @Param('id') id: string,
+    @UploadedFiles() files?: Express.Multer.File[],
+    @Req() req?: Request,
+  ) {
+    return this.productsService.uploadImages(id, files, req);
+  }
+
   @Delete(':id')
   @UseGuards(StaffAuthGuard)
   @HttpCode(HttpStatus.NO_CONTENT)

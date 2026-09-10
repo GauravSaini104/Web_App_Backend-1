@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { InventoryTransactionType, Prisma, UnitOfMeasure } from '@prisma/client';
 import { Request } from 'express';
+import { existsSync, unlinkSync } from 'node:fs';
 import * as xlsx from 'xlsx';
 import { PrismaService } from '../database/prisma.service';
 import { slugify } from '../common/utils/slugify';
@@ -333,6 +334,78 @@ export class ProductsService {
     } catch (error) {
       handlePrismaError(error, 'Product');
     }
+  }
+
+  /**
+   * Uploads multiple images for a product and updates the product record.
+   * Generates full URLs based on BASE_URL and returns full URLs and updated product.
+   */
+  async uploadImages(id: string, files?: Express.Multer.File[], req?: Request) {
+    if (!files || files.length === 0) {
+      throw new BadRequestException('No files were uploaded');
+    }
+
+    const cleanId = (id || '').trim().replace(/^["']|["']$/g, '');
+
+    let product = await this.prisma.product.findUnique({
+      where: { id: cleanId },
+    });
+
+    let matchedVariantId: string | null = null;
+    if (!product) {
+      const variant = await this.prisma.productVariant.findUnique({
+        where: { id: cleanId },
+        include: { product: true },
+      });
+      if (variant) {
+        product = variant.product;
+        matchedVariantId = variant.id;
+      }
+    }
+
+    if (!product) {
+      for (const file of files) {
+        if (file.path && existsSync(file.path)) {
+          try {
+            unlinkSync(file.path);
+          } catch {
+            // ignore cleanup error
+          }
+        }
+      }
+      throw new NotFoundException(`Product with ID "${id}" not found`);
+    }
+
+    const newUrls = files.map((file) => getFullImageUrl(file.filename, req));
+    const currentImages = product.images || [];
+    const combinedImages = Array.from(new Set([...currentImages, ...newUrls]));
+
+    if (matchedVariantId) {
+      const variant = await this.prisma.productVariant.findUnique({ where: { id: matchedVariantId } });
+      const currentVarImages = variant?.images || [];
+      const combinedVarImages = Array.from(new Set([...currentVarImages, ...newUrls]));
+      await this.prisma.productVariant.update({
+        where: { id: matchedVariantId },
+        data: {
+          imageUrl: variant?.imageUrl || newUrls[0],
+          images: combinedVarImages,
+        },
+      });
+    }
+
+    const updatedProduct = await this.prisma.product.update({
+      where: { id: product.id },
+      data: {
+        imageUrl: product.imageUrl || newUrls[0],
+        images: combinedImages,
+      },
+      include: PRODUCT_INCLUDE,
+    });
+
+    return {
+      urls: newUrls,
+      product: this.formatProduct(updatedProduct),
+    };
   }
 
   /**
