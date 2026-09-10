@@ -196,6 +196,24 @@ export class ProductsService {
     };
   }
 
+  /**
+   * Fetches all products belonging to a specific category.
+   * Checks if category exists and returns paginated, availability-enriched products.
+   */
+  async findByCategory(categoryId: string, query: QueryProductDto = {}): Promise<PaginatedResult<unknown>> {
+    const category = await this.prisma.category.findUnique({
+      where: { id: categoryId },
+    });
+    if (!category) {
+      throw new NotFoundException('Category not found');
+    }
+
+    return this.findAll({
+      ...query,
+      categoryId,
+    });
+  }
+
   async findOne(id: string) {
     const product = await this.prisma.product.findUnique({
       where: { id },

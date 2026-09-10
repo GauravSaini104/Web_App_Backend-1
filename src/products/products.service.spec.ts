@@ -32,6 +32,9 @@ const mockPrismaService = {
   stockReservation: {
     groupBy: jest.fn(),
   },
+  category: {
+    findUnique: jest.fn(),
+  },
   $transaction: jest.fn(),
 };
 
@@ -218,6 +221,27 @@ describe('ProductsService', () => {
       mockPrismaService.productVariant.findUnique.mockResolvedValue(null);
 
       await expect(service.findBySku('UNKNOWN')).rejects.toThrow(NotFoundException);
+    });
+  });
+
+  describe('findByCategory', () => {
+    it('returns products for the category when the category exists', async () => {
+      mockPrismaService.category.findUnique.mockResolvedValue({ id: 'cat_1', name: 'Groceries' });
+      const items = [{ id: 'prod_1', categoryId: 'cat_1', variants: [] }];
+      mockPrismaService.$transaction.mockResolvedValue([items, 1]);
+
+      const result = await service.findByCategory('cat_1', { page: 1, limit: 10 } as any);
+
+      expect(mockPrismaService.category.findUnique).toHaveBeenCalledWith({ where: { id: 'cat_1' } });
+      expect(result.items).toEqual(items);
+      expect(result.meta).toEqual({ total: 1, page: 1, limit: 10, totalPages: 1 });
+    });
+
+    it('throws NotFoundException when the category does not exist', async () => {
+      mockPrismaService.category.findUnique.mockResolvedValue(null);
+
+      await expect(service.findByCategory('missing_cat')).rejects.toThrow(NotFoundException);
+      expect(mockPrismaService.$transaction).not.toHaveBeenCalled();
     });
   });
 

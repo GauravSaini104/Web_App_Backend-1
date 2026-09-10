@@ -74,6 +74,15 @@ export class ProductsController {
     return this.productsService.findBySku(sku);
   }
 
+  // Must come before ':id' — otherwise "category" would be matched as an id.
+  @Get('category/:categoryId')
+  findByCategory(
+    @Param('categoryId') categoryId: string,
+    @Query() query: QueryProductDto,
+  ) {
+    return this.productsService.findByCategory(categoryId, query);
+  }
+
   @Get(':id')
   findOne(@Param('id') id: string) {
     return this.productsService.findOne(id);
