@@ -18,6 +18,8 @@ import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
 import { StaffAuthGuard } from '../auth/guards/staff-auth.guard';
 
+
+
 @Controller('categories')
 export class CategoriesController {
   constructor(
