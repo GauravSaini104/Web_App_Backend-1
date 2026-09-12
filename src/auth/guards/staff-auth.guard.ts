@@ -6,7 +6,10 @@ import { AuthenticatedUser } from '../strategies/jwt.strategy';
 @Injectable()
 export class StaffAuthGuard extends AuthGuard('jwt') {
   handleRequest<TUser = AuthenticatedUser>(err: unknown, user: AuthenticatedUser | false): TUser {
-    if (err || !user || user.type !== 'staff') {
+    if (err) {
+      throw err;
+    }
+    if (!user || user.type !== 'staff') {
       throw new UnauthorizedException('Staff login required');
     }
     return user as TUser;

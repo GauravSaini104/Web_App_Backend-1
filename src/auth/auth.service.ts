@@ -71,8 +71,6 @@ export class AuthService {
     };
   }
 
-  private readonly blacklistedTokens = new Set<string>();
-
   @Cron('0 */15 * * * *')
   async purgeExpiredOtps() {
     try {
@@ -125,6 +123,8 @@ export class AuthService {
       create: { phone, isPhoneVerified: true },
     });
 
+    this.userRevokedAt.delete(customer.id);
+
     const [accessToken, refreshToken] = await Promise.all([
       this.jwtService.signAsync(
         { sub: customer.id, type: 'customer' },
@@ -172,6 +172,8 @@ export class AuthService {
     if (!staff || !staff.isActive || !(await bcrypt.compare(dto.password, staff.passwordHash))) {
       throw new UnauthorizedException('Invalid username or password');
     }
+
+    this.userRevokedAt.delete(staff.id);
 
     const [accessToken, refreshToken] = await Promise.all([
       this.jwtService.signAsync(
@@ -256,15 +258,56 @@ export class AuthService {
     }
   }
 
-  logout(token?: string) {
-    if (token) {
-      this.blacklistedTokens.add(token);
+  private readonly blacklistedTokens = new Set<string>();
+  private readonly userRevokedAt = new Map<string, number>();
+
+  logout(accessToken?: string, refreshToken?: string) {
+    let userId: string | undefined;
+
+    if (accessToken) {
+      this.blacklistedTokens.add(accessToken);
+      try {
+        const decoded = this.jwtService.decode(accessToken) as { sub?: string } | null;
+        if (decoded?.sub) {
+          userId = decoded.sub;
+        }
+      } catch {
+        // Ignore decode failures for malformed tokens
+      }
     }
+
+    if (refreshToken) {
+      this.blacklistedTokens.add(refreshToken);
+      try {
+        const decoded = this.jwtService.decode(refreshToken) as { sub?: string } | null;
+        if (decoded?.sub) {
+          userId = decoded.sub;
+        }
+      } catch {
+        // Ignore decode failures for malformed tokens
+      }
+    }
+
+    if (userId) {
+      this.userRevokedAt.set(userId, Math.floor(Date.now() / 1000));
+    }
+
     return { message: 'Logged out successfully' };
   }
 
   isTokenRevoked(token: string): boolean {
     return this.blacklistedTokens.has(token);
+  }
+
+  isUserRevoked(userId: string, tokenIat?: number): boolean {
+    const revokedAt = this.userRevokedAt.get(userId);
+    if (!revokedAt) {
+      return false;
+    }
+    if (!tokenIat) {
+      return true;
+    }
+    return tokenIat <= revokedAt;
   }
 
   async getCurrentUser(user: AuthenticatedUser) {

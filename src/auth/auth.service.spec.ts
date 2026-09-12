@@ -22,6 +22,7 @@ const mockPrismaService = {
 const mockJwtService = {
   signAsync: jest.fn().mockResolvedValue('signed-token'),
   verifyAsync: jest.fn().mockResolvedValue({}),
+  decode: jest.fn().mockReturnValue(null),
 };
 
 const mockSmsService = { isConfigured: jest.fn(), sendOtp: jest.fn() };
@@ -156,14 +157,44 @@ describe('AuthService', () => {
       expect(result.user).toHaveProperty('id', 'cust_1');
     });
 
-    it('blacklists a token on logout', async () => {
-      const token = 'token-to-invalidate';
-      expect(service.isTokenRevoked(token)).toBe(false);
+    it('blacklists both access token and refresh token on logout', async () => {
+      const accessToken = 'access-token-to-invalidate';
+      const refreshToken = 'refresh-token-to-invalidate';
 
-      const logoutResult = service.logout(token);
+      expect(service.isTokenRevoked(accessToken)).toBe(false);
+      expect(service.isTokenRevoked(refreshToken)).toBe(false);
+
+      const logoutResult = service.logout(accessToken, refreshToken);
 
       expect(logoutResult).toEqual({ message: 'Logged out successfully' });
-      expect(service.isTokenRevoked(token)).toBe(true);
+      expect(service.isTokenRevoked(accessToken)).toBe(true);
+      expect(service.isTokenRevoked(refreshToken)).toBe(true);
+    });
+
+    it('rejects refreshing with a revoked refresh token', async () => {
+      const refreshToken = 'revoked-refresh-token';
+      service.logout(undefined, refreshToken);
+
+      mockJwtService.verifyAsync = jest.fn().mockResolvedValue({
+        sub: 'cust_1',
+        type: 'customer',
+        isRefreshToken: true,
+      });
+
+      await expect(service.refreshToken(refreshToken)).rejects.toThrow(
+        'Refresh token has been revoked',
+      );
+    });
+
+    it('marks all previous tokens for user as revoked when logging out via refresh token', async () => {
+      const refreshToken = 'sample-refresh-token';
+      mockJwtService.decode = jest.fn().mockReturnValue({ sub: 'cust_999' });
+
+      service.logout(undefined, refreshToken);
+
+      const oldTokenIat = Math.floor(Date.now() / 1000) - 10;
+      expect(service.isUserRevoked('cust_999', oldTokenIat)).toBe(true);
+      expect(service.isUserRevoked('other_cust', oldTokenIat)).toBe(false);
     });
   });
 

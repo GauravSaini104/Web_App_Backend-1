@@ -428,7 +428,7 @@ export class ProductsService {
     } catch (error) {
       handlePrismaError(error, 'Product');
     }
-  }
+  }      
 
   async addVariant(
     productId: string,

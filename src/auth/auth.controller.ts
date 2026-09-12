@@ -16,6 +16,7 @@ import { VerifyOtpDto } from './dto/verify-otp.dto';
 import { StaffRegisterDto } from './dto/staff-register.dto';
 import { StaffLoginDto } from './dto/staff-login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
+import { LogoutDto } from './dto/logout.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { OtpRateLimitGuard } from './guards/otp-rate-limit.guard';
 import { CurrentUser } from './decorators/current-user.decorator';
@@ -58,12 +59,13 @@ export class AuthController {
     return this.authService.refreshToken(dto.refreshToken);
   }
 
-  @Post('logout')
+  @Post(['customer/logout', 'logout'])
   @HttpCode(HttpStatus.OK)
-  logout(@Req() req: Request) {
+  logout(@Req() req: Request, @Body() dto?: LogoutDto) {
     const authHeader = req.headers['authorization'];
-    const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
-    return this.authService.logout(token);
+    const headerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined;
+    const accessToken = headerToken ?? dto?.accessToken;
+    return this.authService.logout(accessToken, dto?.refreshToken);
   }
 
   @Get('me')

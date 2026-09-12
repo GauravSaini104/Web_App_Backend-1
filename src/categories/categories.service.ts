@@ -18,7 +18,7 @@ export class CategoriesService {
           description: dto.description,
           isActive: dto.isActive,    
         },
-      });
+      }); 
     } catch (error) {
       handlePrismaError(error, 'Category');
     }

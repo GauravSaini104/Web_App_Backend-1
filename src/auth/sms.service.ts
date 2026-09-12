@@ -8,18 +8,7 @@ interface Fast2SmsResponse {
   message?: string | string[];
 }
 
-/**
- * Sends OTP SMS via Fast2SMS's "Quick SMS" route (route=q) — this works
- * without a pre-approved DLT template, unlike Fast2SMS's dedicated OTP-
- * template route, which a brand-new account won't have set up yet. Trade-
- * off: Fast2SMS restricts this route to the number registered on the
- * account itself, so it's a real "send a real SMS" path, but only for
- * self-testing until a proper DLT-registered template is set up later.
- *
- * Inert unless SMS_PROVIDER=fast2sms and FAST2SMS_API_KEY are both set —
- * otherwise AuthService falls back to returning the OTP in the response
- * for local testing, exactly as before this integration existed.
- */
+
 @Injectable()
 export class SmsService {
   private readonly logger = new Logger(SmsService.name);
@@ -38,6 +27,7 @@ export class SmsService {
     return this.sendMessage(phone, message);
   }
 
+  
   async sendMessage(phone: string, message: string): Promise<void> {
     const rawApiKey = this.configService.get<string>('FAST2SMS_API_KEY')?.trim();
     if (!rawApiKey) {
