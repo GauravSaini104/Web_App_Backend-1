@@ -2,6 +2,7 @@ import { BadRequestException, Injectable, NotFoundException } from '@nestjs/comm
 import { InventoryTransactionType, Prisma, UnitOfMeasure } from '@prisma/client';
 import { Request } from 'express';
 import { existsSync, unlinkSync } from 'node:fs';
+import { join } from 'node:path';
 import * as xlsx from 'xlsx';
 import { PrismaService } from '../database/prisma.service';
 import { slugify } from '../common/utils/slugify';
@@ -14,7 +15,7 @@ import { CreateProductVariantDto } from './dto/create-product-variant.dto';
 import { UpdateProductVariantDto } from './dto/update-product-variant.dto';
 import { BulkImportResult, BulkImportRowError } from './dto/bulk-import-product.dto';
 import { DEFAULT_LOW_STOCK_THRESHOLD } from '../inventory/inventory.constants';
-import { getBaseUrl, getFullImageUrl } from '../uploads/uploads.config';
+import { getBaseUrl, getFullImageUrl, PRODUCT_UPLOAD_DIR } from '../uploads/uploads.config';
 
 const PRODUCT_INCLUDE = { brand: true, category: true, variants: true } as const;
 
@@ -68,6 +69,12 @@ export class ProductsService {
               : [],
           }),
         })),
+      }),
+      ...(product.category && {
+        category: {
+          ...product.category,
+          imageUrl: formatImageUrl(product.category.imageUrl),
+        },
       }),
       ...(product.product && {
         product: this.formatProduct(product.product),
@@ -305,14 +312,35 @@ export class ProductsService {
     files?: Express.Multer.File[],
     req?: Request,
   ) {
-    await this.findOne(id);
+    const currentProduct = await this.findOne(id);
 
     if (files && files.length > 0) {
-      const uploadedUrls = files.map((f) => getFullImageUrl(f.filename, req));
-      dto.images = [...(dto.images || []), ...uploadedUrls];
-      if (!dto.imageUrl && dto.images.length > 0) {
-        dto.imageUrl = dto.images[0];
+      // Clean up old local images from disk when replacing with new images
+      const allOldImages = [
+        ...(currentProduct.imageUrl ? [currentProduct.imageUrl] : []),
+        ...(Array.isArray(currentProduct.images) ? currentProduct.images : []),
+      ];
+      for (const oldUrl of allOldImages) {
+        if (typeof oldUrl === 'string' && oldUrl.includes('/uploads/products/')) {
+          const oldFilename = oldUrl.split('/uploads/products/')[1];
+          if (oldFilename) {
+            const oldFilePath = join(PRODUCT_UPLOAD_DIR, oldFilename);
+            if (existsSync(oldFilePath)) {
+              try {
+                unlinkSync(oldFilePath);
+              } catch {
+                // ignore cleanup error
+              }
+            }
+          }
+        }
       }
+
+      const uploadedUrls = files.map((f) => getFullImageUrl(f.filename, req));
+      dto.images = uploadedUrls;
+      dto.imageUrl = uploadedUrls[0];
+    } else if (dto.imageUrl && (!dto.images || dto.images.length === 0)) {
+      dto.images = [dto.imageUrl];
     }
 
     try {
@@ -409,22 +437,61 @@ export class ProductsService {
   }
 
   /**
-   * Soft delete: retires the product and every one of its pack sizes
-   * instead of erasing rows. A product that has ever been sold needs to
-   * keep existing for its own order/stock history to make sense — this is
-   * "no longer available," not "never existed." Reactivate later with a
-   * plain PATCH { isActive: true }.
+   * Permanently deletes a product and all of its associated records
+   * (inventory, reservations, cart items, variants) from the database.
    */
   async remove(id: string) {
-    await this.findOne(id);
+    const product = await this.prisma.product.findUnique({
+      where: { id },
+      include: { variants: true },
+    });
+
+    if (!product) {
+      throw new NotFoundException(`Product with ID '${id}' not found`);
+    }
+
+    const variantIds = product.variants.map((v) => v.id);
+
+    if (variantIds.length > 0) {
+      const orderItemCount = await this.prisma.orderItem.count({
+        where: { variantId: { in: variantIds } },
+      });
+
+      if (orderItemCount > 0) {
+        throw new BadRequestException(
+          'Cannot delete product because it has associated order history. Deactivate it instead.',
+        );
+      }
+    }
+
     try {
-      await this.prisma.$transaction([
-        this.prisma.product.update({ where: { id }, data: { isActive: false } }),
-        this.prisma.productVariant.updateMany({
-          where: { productId: id },
-          data: { isActive: false },
-        }),
-      ]);
+      await this.prisma.$transaction(async (tx) => {
+        if (variantIds.length > 0) {
+          await tx.cartItem.deleteMany({
+            where: { variantId: { in: variantIds } },
+          });
+          await tx.inventoryTransaction.deleteMany({
+            where: { variantId: { in: variantIds } },
+          });
+          await tx.stockReservation.deleteMany({
+            where: { variantId: { in: variantIds } },
+          });
+          await tx.inventory.deleteMany({
+            where: { variantId: { in: variantIds } },
+          });
+          await tx.productVariant.deleteMany({
+            where: { productId: id },
+          });
+        }
+        await tx.product.delete({
+          where: { id },
+        });
+      });
+
+      return {
+        message: 'Product deleted successfully',
+        id,
+      };
     } catch (error) {
       handlePrismaError(error, 'Product');
     }
@@ -485,14 +552,34 @@ export class ProductsService {
     this.assertSellingPriceValid(mrp, sellingPrice);
 
     if (files && files.length > 0) {
-      const uploadedUrls = files.map((f) => getFullImageUrl(f.filename, req));
-      dto.images = [...(dto.images || []), ...uploadedUrls];
-      if (!dto.imageUrl && dto.images.length > 0) {
-        dto.imageUrl = dto.images[0];
+      // Clean up old local variant images from disk when replacing
+      const allOldImages = [
+        ...(variant.imageUrl ? [variant.imageUrl] : []),
+        ...(Array.isArray(variant.images) ? variant.images : []),
+      ];
+      for (const oldUrl of allOldImages) {
+        if (typeof oldUrl === 'string' && oldUrl.includes('/uploads/products/')) {
+          const oldFilename = oldUrl.split('/uploads/products/')[1];
+          if (oldFilename) {
+            const oldFilePath = join(PRODUCT_UPLOAD_DIR, oldFilename);
+            if (existsSync(oldFilePath)) {
+              try {
+                unlinkSync(oldFilePath);
+              } catch {
+                // ignore cleanup error
+              }
+            }
+          }
+        }
       }
+
+      const uploadedUrls = files.map((f) => getFullImageUrl(f.filename, req));
+      dto.images = uploadedUrls;
+      dto.imageUrl = uploadedUrls[0];
+    } else if (dto.imageUrl && (!dto.images || dto.images.length === 0)) {
+      dto.images = [dto.imageUrl];
     }
 
-    
     try {
       const updated = await this.prisma.productVariant.update({
         where: { id: variantId },

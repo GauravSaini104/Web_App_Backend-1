@@ -1,24 +1,31 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { Request } from 'express';
 import { PrismaService } from '../database/prisma.service';
 import { slugify } from '../common/utils/slugify';
 import { handlePrismaError } from '../common/utils/prisma-error.util';
 import { CreateCategoryDto } from './dto/create-category.dto';
 import { UpdateCategoryDto } from './dto/update-category.dto';
+import { getCategoryFullImageUrl } from '../uploads/uploads.config';
 
 @Injectable()
 export class CategoriesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) { }
 
-  async create(dto: CreateCategoryDto) {
+  async create(dto: CreateCategoryDto, files?: Express.Multer.File[], req?: Request) {
+    if (files && files.length > 0) {
+      dto.imageUrl = getCategoryFullImageUrl(files[0].filename, req);
+    }
+
     try {
       return await this.prisma.category.create({
         data: {
           name: dto.name,
           slug: dto.slug ?? slugify(dto.name),
           description: dto.description,
-          isActive: dto.isActive,    
+          imageUrl: dto.imageUrl,
+          isActive: dto.isActive,
         },
-      }); 
+      });
     } catch (error) {
       handlePrismaError(error, 'Category');
     }
@@ -36,8 +43,12 @@ export class CategoriesService {
     return category;
   }
 
-  async update(id: string, dto: UpdateCategoryDto) {
+  async update(id: string, dto: UpdateCategoryDto, files?: Express.Multer.File[], req?: Request) {
     await this.findOne(id);
+    if (files && files.length > 0) {
+      dto.imageUrl = getCategoryFullImageUrl(files[0].filename, req);
+    }
+
     try {
       return await this.prisma.category.update({
         where: { id },
@@ -45,6 +56,7 @@ export class CategoriesService {
           name: dto.name,
           slug: dto.slug,
           description: dto.description,
+          imageUrl: dto.imageUrl,
           isActive: dto.isActive,
         },
       });

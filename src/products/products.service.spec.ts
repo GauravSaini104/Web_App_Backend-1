@@ -311,21 +311,25 @@ describe('ProductsService', () => {
   });
 
   describe('remove', () => {
-    it('soft-deletes the product and all its variants instead of erasing rows', async () => {
-      mockPrismaService.product.findUnique.mockResolvedValue({ id: 'prod_1', variants: [] });
-      mockPrismaService.$transaction.mockResolvedValue([{}, {}]);
-
-      await service.remove('prod_1');
-
-      expect(mockPrismaService.product.update).toHaveBeenCalledWith({
-        where: { id: 'prod_1' },
-        data: { isActive: false },
+    it('permanently deletes the product and all its variants from the database', async () => {
+      mockPrismaService.product.findUnique.mockResolvedValue({ id: 'prod_1', variants: [{ id: 'var_1' }] });
+      mockPrismaService.orderItem.count.mockResolvedValue(0);
+      mockPrismaService.$transaction.mockImplementation(async (cb) => {
+        if (typeof cb === 'function') {
+          return cb({
+            cartItem: { deleteMany: jest.fn().mockResolvedValue({}) },
+            inventoryTransaction: { deleteMany: jest.fn().mockResolvedValue({}) },
+            stockReservation: { deleteMany: jest.fn().mockResolvedValue({}) },
+            inventory: { deleteMany: jest.fn().mockResolvedValue({}) },
+            productVariant: { deleteMany: jest.fn().mockResolvedValue({}) },
+            product: { delete: jest.fn().mockResolvedValue({}) },
+          });
+        }
+        return cb;
       });
-      expect(mockPrismaService.productVariant.updateMany).toHaveBeenCalledWith({
-        where: { productId: 'prod_1' },
-        data: { isActive: false },
-      });
-      expect(mockPrismaService.product.delete).not.toHaveBeenCalled();
+
+      const result = await service.remove('prod_1');
+      expect(result).toEqual({ message: 'Product deleted successfully', id: 'prod_1' });
     });
 
     it('throws NotFoundException when the product does not exist', async () => {

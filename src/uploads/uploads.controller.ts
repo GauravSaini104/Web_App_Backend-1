@@ -21,6 +21,9 @@ import { StaffAuthGuard } from '../auth/guards/staff-auth.guard';
 import { PrismaService } from '../database/prisma.service';
 import {
   ALLOWED_IMAGE_MIME_TYPES,
+  CATEGORY_MULTER_OPTIONS,
+  CATEGORY_UPLOAD_DIR,
+  getCategoryFullImageUrl,
   getFullImageUrl,
   MAX_IMAGE_FILE_SIZE_BYTES,
   PRODUCT_MULTER_OPTIONS,
@@ -33,10 +36,73 @@ export class UploadProductImageDto {
   productId!: string;
 }
 
+export class UploadCategoryImageDto {
+  @IsString()
+  @IsNotEmpty({ message: 'categoryId is required' })
+  categoryId!: string;
+}
+
 @Controller('uploads')
 @UseGuards(StaffAuthGuard)
 export class UploadsController {
   constructor(private readonly prisma: PrismaService) {}
+
+  @Post('category-image')
+  @UseInterceptors(
+    FileInterceptor('file', CATEGORY_MULTER_OPTIONS),
+  )
+  async uploadCategoryImage(
+    @UploadedFile() file: Express.Multer.File,
+    @Body() dto: UploadCategoryImageDto,
+    @Req() req: Request,
+  ) {
+    if (!file) {
+      throw new BadRequestException('No file was uploaded');
+    }
+
+    const cleanId = (dto.categoryId || '').trim().replace(/^["']|["']$/g, '');
+
+    const category = await this.prisma.category.findUnique({
+      where: { id: cleanId },
+    });
+
+    if (!category) {
+      if (file.path && existsSync(file.path)) {
+        try {
+          unlinkSync(file.path);
+        } catch {
+          // ignore cleanup error
+        }
+      }
+      throw new NotFoundException(`Category with ID "${dto.categoryId}" not found`);
+    }
+
+    if (category.imageUrl && category.imageUrl.includes('/uploads/categories/')) {
+      const oldFilename = category.imageUrl.split('/uploads/categories/')[1];
+      if (oldFilename) {
+        const oldFilePath = join(CATEGORY_UPLOAD_DIR, oldFilename);
+        if (existsSync(oldFilePath)) {
+          try {
+            unlinkSync(oldFilePath);
+          } catch {
+            // ignore cleanup error
+          }
+        }
+      }
+    }
+
+    const fullUrl = getCategoryFullImageUrl(file.filename, req);
+
+    const updatedCategory = await this.prisma.category.update({
+      where: { id: cleanId },
+      data: { imageUrl: fullUrl },
+    });
+
+    return {
+      url: fullUrl,
+      category: updatedCategory,
+    };
+  }
 
   @Post('product-image')
   @UseInterceptors(

@@ -117,6 +117,7 @@ export class ProductsController {
     return this.productsService.create(dto, files, req);
   }
 
+  
   @Patch(':id')
   @UseGuards(StaffAuthGuard)
   @UseInterceptors(AnyFilesInterceptor(PRODUCT_MULTER_OPTIONS))
@@ -142,7 +143,6 @@ export class ProductsController {
 
   @Delete(':id')
   @UseGuards(StaffAuthGuard)
-  @HttpCode(HttpStatus.NO_CONTENT)
   remove(@Param('id') id: string) {
     return this.productsService.remove(id);
   }

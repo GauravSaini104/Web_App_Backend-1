@@ -13,9 +13,11 @@ export const ALLOWED_IMAGE_MIME_TYPES: Record<string, string> = {
 
 export const MAX_IMAGE_FILE_SIZE_BYTES = 5 * 1024 * 1024; // 5MB
 export const PRODUCT_UPLOAD_DIR = join(process.cwd(), 'uploads', 'products');
+export const CATEGORY_UPLOAD_DIR = join(process.cwd(), 'uploads', 'categories');
 
-// Ensure directory exists on startup
+// Ensure directories exist on startup
 mkdirSync(PRODUCT_UPLOAD_DIR, { recursive: true });
+mkdirSync(CATEGORY_UPLOAD_DIR, { recursive: true });
 
 /**
  * Returns the configured base URL from .env (e.g. `http://72.62.228.103:3000`),
@@ -37,11 +39,19 @@ export function getBaseUrl(req?: Request): string {
 }
 
 /**
- * Builds the absolute publicly accessible URL for an uploaded file using BASE_URL from .env
+ * Builds the absolute publicly accessible URL for an uploaded product file using BASE_URL from .env
  */
 export function getFullImageUrl(filename: string, req?: Request): string {
   const baseUrl = getBaseUrl(req);
   return `${baseUrl}/uploads/products/${filename}`;
+}
+
+/**
+ * Builds the absolute publicly accessible URL for an uploaded category file using BASE_URL from .env
+ */
+export function getCategoryFullImageUrl(filename: string, req?: Request): string {
+  const baseUrl = getBaseUrl(req);
+  return `${baseUrl}/uploads/categories/${filename}`;
 }
 
 export const PRODUCT_MULTER_OPTIONS = {
@@ -60,3 +70,21 @@ export const PRODUCT_MULTER_OPTIONS = {
     callback(null, true);
   },
 };
+
+export const CATEGORY_MULTER_OPTIONS = {
+  storage: diskStorage({
+    destination: CATEGORY_UPLOAD_DIR,
+    filename: (_req, file, callback) => {
+      callback(null, `${randomUUID()}${ALLOWED_IMAGE_MIME_TYPES[file.mimetype] ?? '.jpg'}`);
+    },
+  }),
+  limits: { fileSize: MAX_IMAGE_FILE_SIZE_BYTES },
+  fileFilter: (_req: any, file: any, callback: any) => {
+    if (!ALLOWED_IMAGE_MIME_TYPES[file.mimetype]) {
+      callback(new BadRequestException('Only JPEG, PNG, or WEBP images are allowed'), false);
+      return;
+    }
+    callback(null, true);
+  },
+};
+
