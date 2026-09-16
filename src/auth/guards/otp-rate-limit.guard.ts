@@ -39,7 +39,7 @@ export class OtpRateLimitGuard implements CanActivate {
     return true;
   }
 
-  private checkAndRecordLimit(
+  private checkAndRecordLimit( 
     map: Map<string, RateLimitRecord>,
     key: string,
     maxLimit: number,
@@ -51,7 +51,7 @@ export class OtpRateLimitGuard implements CanActivate {
     record.timestamps = record.timestamps.filter((ts) => now - ts < this.WINDOW_MS);
 
     if (record.timestamps.length >= maxLimit) {
-      const oldestTimestamp = record.timestamps[0];
+      const oldestTimestamp = record.timestamps[0]; 
       const retryAfterSeconds = Math.ceil((this.WINDOW_MS - (now - oldestTimestamp)) / 1000);
       throw new HttpException(
         {

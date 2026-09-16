@@ -14,14 +14,14 @@ export class CategoriesService {
   async create(dto: CreateCategoryDto, files?: Express.Multer.File[], req?: Request) {
     if (files && files.length > 0) {
       dto.imageUrl = getCategoryFullImageUrl(files[0].filename, req);
-    }
+    }     
 
     try {
       return await this.prisma.category.create({
         data: {
           name: dto.name,
           slug: dto.slug ?? slugify(dto.name),
-          description: dto.description,
+          description: dto.description, 
           imageUrl: dto.imageUrl,
           isActive: dto.isActive,
         },
@@ -60,7 +60,7 @@ export class CategoriesService {
           isActive: dto.isActive,
         },
       });
-    } catch (error) {
+    } catch (error) {     
       handlePrismaError(error, 'Category');
     }
   }

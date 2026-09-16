@@ -35,6 +35,9 @@ const mockPrismaService = {
   category: {
     findUnique: jest.fn(),
   },
+  orderItem: {
+    count: jest.fn(),
+  },
   $transaction: jest.fn(),
 };
 

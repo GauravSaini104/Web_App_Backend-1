@@ -3,6 +3,9 @@ ALTER TYPE "PaymentMethod" ADD VALUE IF NOT EXISTS 'CARD';
 ALTER TYPE "PaymentMethod" ADD VALUE IF NOT EXISTS 'NETBANKING';
 
 -- AlterTable
+ALTER TABLE "categories" ADD COLUMN IF NOT EXISTS "imageUrl" TEXT;
+
+-- AlterTable
 ALTER TABLE "products" ADD COLUMN IF NOT EXISTS "images" TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];
 
 -- AlterTable

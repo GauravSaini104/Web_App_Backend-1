@@ -383,7 +383,7 @@ export class InventoryService {
     reservationId: string,
     updatedCount: number,
   ) {
-    if (updatedCount === 0) {
+    if (updatedCount === 0) { 
       const existing = await tx.stockReservation.findUnique({ where: { id: reservationId } });
       if (!existing) {
         throw new NotFoundException('Reservation not found');
