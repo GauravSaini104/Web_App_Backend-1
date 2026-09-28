@@ -12,14 +12,16 @@ import { CartModule } from './cart/cart.module';
 import { OrdersModule } from './orders/orders.module';
 import { PaymentsModule } from './payments/payments.module';
 import { UploadsModule } from './uploads/uploads.module';
+import { StaffModule } from './staff/staff.module';
 import { AppController } from './app.controller';
 
-@Module({
+@Module({      
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     ScheduleModule.forRoot(),
     PrismaModule,
     AuthModule,
+    StaffModule,
     CustomersModule,
     CategoriesModule,
     BrandsModule,

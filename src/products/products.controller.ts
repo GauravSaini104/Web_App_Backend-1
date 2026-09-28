@@ -83,6 +83,19 @@ export class ProductsController {
     return this.productsService.findByCategory(categoryId, query);
   }
 
+  @Get(':id/variants')
+  findAllVariants(@Param('id') id: string) {
+    return this.productsService.findAllVariants(id);
+  }
+
+  @Get(':id/variants/:variantId')
+  findVariantById(
+    @Param('id') id: string,
+    @Param('variantId') variantId: string,
+  ) {
+    return this.productsService.findVariantById(id, variantId);
+  }
+
   @Get(':id')
   findOne(@Param('id') id: string) {
     return this.productsService.findOne(id);

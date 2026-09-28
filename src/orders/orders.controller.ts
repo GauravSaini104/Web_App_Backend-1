@@ -56,6 +56,13 @@ export class OrdersController {
 
   // ---- Staff routes ----
 
+  // Must come before ':id' below — otherwise "search" would be matched as an id.
+  @Get('search')
+  @UseGuards(StaffAuthGuard)
+  search(@Query() query: QueryOrdersDto) {
+    return this.ordersService.findAllForStaff(query);
+  }
+
   @Get()
   @UseGuards(StaffAuthGuard)
   findAll(@Query() query: QueryOrdersDto) {

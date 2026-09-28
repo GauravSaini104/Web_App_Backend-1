@@ -54,7 +54,7 @@ export class UploadsController {
   async uploadCategoryImage(
     @UploadedFile() file: Express.Multer.File,
     @Body() dto: UploadCategoryImageDto,
-    @Req() req: Request,
+    @Req() req: Request,   
   ) {
     if (!file) {
       throw new BadRequestException('No file was uploaded');

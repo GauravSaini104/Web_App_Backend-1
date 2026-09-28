@@ -20,7 +20,7 @@ import { QueryOrdersDto } from './dto/query-orders.dto';
 import { ALLOWED_STATUS_TRANSITIONS, CUSTOMER_CANCELLABLE_STATUSES } from './orders.constants';
 
 const ORDER_INCLUDE = { items: true } as const;
-const ORDER_INCLUDE_WITH_CUSTOMER = { items: true, customer: true } as const;
+const ORDER_INCLUDE_WITH_CUSTOMER = { items: true, customer: true, payments: true } as const;
 
 @Injectable()
 export class OrdersService {
@@ -182,8 +182,14 @@ export class OrdersService {
   }
 
   async findAllForStaff(query: QueryOrdersDto) {
+    const search = query.search?.trim();
+    const searchNumeric = search ? search.replace(/^[#\s]+|[a-zA-Z\s#]+/g, '') : '';
+    const parsedOrderNumber = searchNumeric && !isNaN(Number(searchNumeric)) ? parseInt(searchNumeric, 10) : NaN;
+
     const where: Prisma.OrderWhereInput = {
       ...(query.status && { status: query.status }),
+      ...(query.paymentMethod && { paymentMethod: query.paymentMethod }),
+      ...(query.fulfillmentMethod && { fulfillmentMethod: query.fulfillmentMethod }),
       ...((query.startDate || query.endDate) && {
         createdAt: {
           ...(query.startDate && { gte: new Date(query.startDate) }),
@@ -196,16 +202,28 @@ export class OrdersService {
           ...(query.maxAmount !== undefined && { lte: query.maxAmount }),
         },
       }),
-      ...(query.search && {
+      ...(search && {
         OR: [
-          ...(Number.isInteger(Number(query.search)) && !isNaN(Number(query.search))
-            ? [{ orderNumber: Number(query.search) }]
-            : []),
-          { customer: { phone: { contains: query.search } } },
-          { customer: { name: { contains: query.search, mode: 'insensitive' as const } } },
+          ...(!isNaN(parsedOrderNumber) ? [{ orderNumber: parsedOrderNumber }] : []),
+          { id: { contains: search, mode: 'insensitive' as const } },
+          { customer: { phone: { contains: search } } },
+          { customer: { name: { contains: search, mode: 'insensitive' as const } } },
+          { deliveryLine1: { contains: search, mode: 'insensitive' as const } },
+          { deliveryLine2: { contains: search, mode: 'insensitive' as const } },
+          { deliveryCity: { contains: search, mode: 'insensitive' as const } },
+          { deliveryState: { contains: search, mode: 'insensitive' as const } },
+          { deliveryPincode: { contains: search } },
+          { items: { some: { productName: { contains: search, mode: 'insensitive' as const } } } },
+          { items: { some: { sku: { contains: search, mode: 'insensitive' as const } } } },
+          { payments: { some: { providerOrderId: { contains: search, mode: 'insensitive' as const } } } },
+          { payments: { some: { providerPaymentId: { contains: search, mode: 'insensitive' as const } } } },
         ],
       }),
     };
+
+    const sortBy = query.sortBy || 'createdAt';
+    const sortOrder = query.sortOrder || 'desc';
+    const orderBy = { [sortBy]: sortOrder };
 
     const page = query.page;
     const limit = query.limit;
@@ -215,7 +233,7 @@ export class OrdersService {
         this.prisma.order.findMany({
           where,
           include: ORDER_INCLUDE_WITH_CUSTOMER,
-          orderBy: { createdAt: 'desc' },
+          orderBy,
           skip: (page - 1) * limit,
           take: limit,
         }),
@@ -235,7 +253,7 @@ export class OrdersService {
     const orders = await this.prisma.order.findMany({
       where,
       include: ORDER_INCLUDE_WITH_CUSTOMER,
-      orderBy: { createdAt: 'desc' },
+      orderBy,
     });
     return orders.map((order) => this.withTotal(order));
   }

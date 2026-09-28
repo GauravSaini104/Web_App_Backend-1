@@ -630,6 +630,50 @@ export class ProductsService {
     }
   }
 
+  async findAllVariants(productId: string) {
+    const product = await this.prisma.product.findUnique({
+      where: { id: productId },
+    });
+    if (!product) {
+      throw new NotFoundException('Product not found');
+    }
+
+    const variants = await this.prisma.productVariant.findMany({
+      where: { productId },
+      include: { product: { include: { brand: true, category: true } } },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    if (variants.length === 0) {
+      return [];
+    }
+
+    const [{ variants: enrichedVariants }] = await this.attachAvailability([{ variants }]);
+    return enrichedVariants;
+  }
+
+  async findVariantById(productId: string, variantId: string) {
+    const product = await this.prisma.product.findUnique({
+      where: { id: productId },
+    });
+    if (!product) {
+      throw new NotFoundException('Product not found');
+    }
+
+    const variant = await this.prisma.productVariant.findFirst({
+      where: { id: variantId, productId },
+      include: { product: { include: { brand: true, category: true } } },
+    });
+    if (!variant) {
+      throw new NotFoundException('Product variant not found');
+    }
+
+    const [{ variants: enrichedVariants }] = await this.attachAvailability([
+      { variants: [variant] },
+    ]);
+    return enrichedVariants[0];
+  }
+
   private async findVariantOrThrow(productId: string, variantId: string) {
     const variant = await this.prisma.productVariant.findFirst({
       where: { id: variantId, productId },

@@ -23,7 +23,7 @@ const mockTx = {
 const mockPrismaService = {
   cartItem: { findMany: jest.fn() },
   address: { findFirst: jest.fn() },
-  order: { findMany: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn() },
+  order: { findMany: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn(), count: jest.fn() },
   $transaction: jest.fn((callback: (tx: typeof mockTx) => unknown) => callback(mockTx)),
 };
 
@@ -384,4 +384,60 @@ describe('OrdersService', () => {
       expect(result).toEqual({ cancelledCount: 0 });
     });
   });
+
+  describe('findAllForStaff', () => {
+    it('searches orders by order number, customer phone, product name, or payment IDs', async () => {
+      const mockOrder = {
+        id: 'order_1',
+        orderNumber: 1042,
+        subtotal: 100,
+        deliveryFee: 20,
+        customer: { phone: '9876543210', name: 'John Doe' },
+        items: [{ productName: 'Tata Sugar', sku: 'SUGAR-1KG' }],
+        payments: [],
+      };
+      mockPrismaService.order.findMany.mockResolvedValue([mockOrder]);
+
+      const result = (await service.findAllForStaff({ search: '1042' })) as any[];
+
+      expect(mockPrismaService.order.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            OR: expect.arrayContaining([
+              { orderNumber: 1042 },
+              { id: { contains: '1042', mode: 'insensitive' } },
+            ]),
+          }),
+        }),
+      );
+      expect(result).toHaveLength(1);
+      expect(result[0].total).toBe(120);
+    });
+
+    it('supports paginated order searches', async () => {
+      const mockOrder = {
+        id: 'order_1',
+        orderNumber: 1042,
+        subtotal: 100,
+        deliveryFee: 20,
+        customer: { phone: '9876543210', name: 'John Doe' },
+        items: [],
+        payments: [],
+      };
+      (mockPrismaService.$transaction as any).mockResolvedValue([[mockOrder], 1]);
+
+      const result = await service.findAllForStaff({ page: 1, limit: 10, search: 'John' });
+
+      expect(result).toEqual({
+        items: [expect.objectContaining({ id: 'order_1', total: 120 })],
+        meta: {
+          total: 1,
+          page: 1,
+          limit: 10,
+          totalPages: 1,
+        },
+      });
+    });
+  });
 });
+

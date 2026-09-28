@@ -38,6 +38,7 @@ export function getBaseUrl(req?: Request): string {
   return 'http://localhost:3000';
 }
 
+
 /**
  * Builds the absolute publicly accessible URL for an uploaded product file using BASE_URL from .env
  */
