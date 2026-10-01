@@ -17,6 +17,7 @@ import { CreateOrderDto } from './dto/create-order.dto';
 import { CancelOrderDto } from './dto/cancel-order.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { QueryOrdersDto } from './dto/query-orders.dto';
+import { OrderStatsDto } from './dto/order-stats.dto';
 import { ALLOWED_STATUS_TRANSITIONS, CUSTOMER_CANCELLABLE_STATUSES } from './orders.constants';
 
 const ORDER_INCLUDE = { items: true } as const;
@@ -167,6 +168,52 @@ export class OrdersService {
     return this.withTotal(order);
   }
 
+  async getCustomerOrderStats(customerId: string) {
+    const [statusGroups, totalOrders, recentOrdersRaw] = await this.prisma.$transaction([
+      this.prisma.order.groupBy({
+        by: ['status'],
+        _count: { status: true },
+        where: { customerId },
+        orderBy: { status: 'asc' },
+      }),
+      this.prisma.order.count({ where: { customerId } }),
+      this.prisma.order.findMany({
+        where: { customerId },
+        include: ORDER_INCLUDE,
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+      }),
+    ]);
+
+    const countsByStatus: Record<OrderStatus, number> = {
+      [OrderStatus.PENDING_PAYMENT]: 0,
+      [OrderStatus.CONFIRMED]: 0,
+      [OrderStatus.PACKED]: 0,
+      [OrderStatus.READY]: 0,
+      [OrderStatus.COMPLETED]: 0,
+      [OrderStatus.CANCELLED]: 0,
+    };
+
+    for (const group of statusGroups) {
+      countsByStatus[group.status] = (group._count as any)?.status ?? (group._count as any)?._all ?? 0;
+    }
+
+    return {
+      summary: {
+        totalOrders,
+        completedOrders: countsByStatus[OrderStatus.COMPLETED],
+        pendingOrders: countsByStatus[OrderStatus.PENDING_PAYMENT],
+        inProgressOrders:
+          countsByStatus[OrderStatus.CONFIRMED] +
+          countsByStatus[OrderStatus.PACKED] +
+          countsByStatus[OrderStatus.READY],
+        cancelledOrders: countsByStatus[OrderStatus.CANCELLED],
+        countsByStatus,
+      },
+      recentOrders: recentOrdersRaw.map((order) => this.withTotal(order)),
+    };
+  }
+
   async cancelOrder(customerId: string, orderId: string, dto: CancelOrderDto) {
     const order = await this.prisma.order.findFirst({ where: { id: orderId, customerId } });
     if (!order) {
@@ -179,6 +226,174 @@ export class OrdersService {
     }
 
     return this.performCancellation(orderId, dto.reason ?? 'Cancelled by customer');
+  }
+
+  async getOrderStats(query: OrderStatsDto = {}) {
+    const limit = query.limit ? Math.min(Math.max(query.limit, 1), 100) : 10;
+
+    const dateFilter: Prisma.DateTimeFilter | undefined =
+      query.startDate || query.endDate
+        ? {
+            ...(query.startDate && { gte: new Date(query.startDate) }),
+            ...(query.endDate && { lte: new Date(query.endDate) }),
+          }
+        : undefined;
+
+    const baseWhere: Prisma.OrderWhereInput = {
+      ...(dateFilter && { createdAt: dateFilter }),
+      ...(query.paymentMethod && { paymentMethod: query.paymentMethod }),
+      ...(query.fulfillmentMethod && { fulfillmentMethod: query.fulfillmentMethod }),
+    };
+
+    const statsWhere: Prisma.OrderWhereInput = {
+      ...baseWhere,
+      ...(query.status && { status: query.status }),
+    };
+
+    const recentOrdersWhere: Prisma.OrderWhereInput = {
+      ...baseWhere,
+      ...(query.status && { status: query.status }),
+    };
+
+    const [statusGroups, totalOrders, completedAgg, recentOrdersRaw] =
+      await this.prisma.$transaction([
+        this.prisma.order.groupBy({
+          by: ['status'],
+          _count: { status: true },
+          _sum: { subtotal: true, deliveryFee: true },
+          where: baseWhere,
+          orderBy: { status: 'asc' },
+        }),
+        this.prisma.order.count({ where: statsWhere }),
+        this.prisma.order.aggregate({
+          _sum: { subtotal: true, deliveryFee: true },
+          where: { ...baseWhere, status: OrderStatus.COMPLETED },
+        }),
+        this.prisma.order.findMany({
+          where: recentOrdersWhere,
+          include: ORDER_INCLUDE_WITH_CUSTOMER,
+          orderBy: { createdAt: 'desc' },
+          take: limit,
+        }),
+      ]);
+
+    const countsByStatus: Record<OrderStatus, number> = {
+      [OrderStatus.PENDING_PAYMENT]: 0,
+      [OrderStatus.CONFIRMED]: 0,
+      [OrderStatus.PACKED]: 0,
+      [OrderStatus.READY]: 0,
+      [OrderStatus.COMPLETED]: 0,
+      [OrderStatus.CANCELLED]: 0,
+    };
+
+    let totalRevenueAll = 0;
+
+    for (const group of statusGroups) {
+      countsByStatus[group.status] = (group._count as any)?.status ?? (group._count as any)?._all ?? 0;
+      const sub = Number(group._sum?.subtotal ?? 0);
+      const del = Number(group._sum?.deliveryFee ?? 0);
+      totalRevenueAll += sub + del;
+    }
+
+    const completedRevenue =
+      Number(completedAgg._sum?.subtotal ?? 0) + Number(completedAgg._sum?.deliveryFee ?? 0);
+
+    const pendingPaymentOrders = countsByStatus[OrderStatus.PENDING_PAYMENT];
+    const confirmedOrders = countsByStatus[OrderStatus.CONFIRMED];
+    const packedOrders = countsByStatus[OrderStatus.PACKED];
+    const readyOrders = countsByStatus[OrderStatus.READY];
+    const completedOrders = countsByStatus[OrderStatus.COMPLETED];
+    const cancelledOrders = countsByStatus[OrderStatus.CANCELLED];
+    const inProgressOrders = confirmedOrders + packedOrders + readyOrders;
+    const activeUnfulfilledOrders = pendingPaymentOrders + inProgressOrders;
+
+    const recentOrders = recentOrdersRaw.map((order) => {
+      const subtotal = Number(order.subtotal);
+      const deliveryFee = Number(order.deliveryFee);
+      const total = Number((subtotal + deliveryFee).toFixed(2));
+      const totalItemsCount = order.items?.length ?? 0;
+      const totalQuantity = (order.items ?? []).reduce((sum, item) => sum + item.quantity, 0);
+
+      return {
+        id: order.id,
+        orderNumber: order.orderNumber,
+        status: order.status,
+        paymentMethod: order.paymentMethod,
+        fulfillmentMethod: order.fulfillmentMethod,
+        subtotal,
+        deliveryFee,
+        total,
+        totalItemsCount,
+        totalQuantity,
+        createdAt: order.createdAt,
+        updatedAt: order.updatedAt,
+        cancelledAt: order.cancelledAt,
+        cancelReason: order.cancelReason,
+        customer: order.customer
+          ? {
+              id: order.customer.id,
+              name: order.customer.name,
+              phone: order.customer.phone,
+            }
+          : null,
+        deliveryAddress:
+          order.fulfillmentMethod === FulfillmentMethod.DELIVERY
+            ? {
+                label: order.deliveryLabel,
+                line1: order.deliveryLine1,
+                line2: order.deliveryLine2,
+                city: order.deliveryCity,
+                state: order.deliveryState,
+                pincode: order.deliveryPincode,
+              }
+            : null,
+        items: (order.items ?? []).map((item) => ({
+          id: item.id,
+          variantId: item.variantId,
+          productName: item.productName,
+          sku: item.sku,
+          unit: item.unit,
+          weight: Number(item.weight),
+          unitPrice: Number(item.unitPrice),
+          quantity: item.quantity,
+          lineTotal: Number(item.lineTotal),
+        })),
+        payments: (order.payments ?? []).map((p) => ({
+          id: p.id,
+          provider: p.provider,
+          providerOrderId: p.providerOrderId,
+          providerPaymentId: p.providerPaymentId,
+          amount: Number(p.amount),
+          status: p.status,
+          failureReason: p.failureReason,
+          createdAt: p.createdAt,
+        })),
+      };
+    });
+
+    return {
+      summary: {
+        totalOrders,
+        completedOrders,
+        pendingOrders: pendingPaymentOrders,
+        inProgressOrders,
+        activeUnfulfilledOrders,
+        cancelledOrders,
+        countsByStatus,
+        completedRevenue: Number(completedRevenue.toFixed(2)),
+        totalRevenueAll: Number(totalRevenueAll.toFixed(2)),
+        averageOrderValue:
+          completedOrders > 0
+            ? Number((completedRevenue / completedOrders).toFixed(2))
+            : 0,
+      },
+      recentOrders,
+    };
+  }
+
+  async getRecentOrders(limit = 10) {
+    const stats = await this.getOrderStats({ limit });
+    return stats.recentOrders;
   }
 
   async findAllForStaff(query: QueryOrdersDto) {

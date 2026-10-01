@@ -23,7 +23,15 @@ const mockTx = {
 const mockPrismaService = {
   cartItem: { findMany: jest.fn() },
   address: { findFirst: jest.fn() },
-  order: { findMany: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn(), count: jest.fn() },
+  order: {
+    findMany: jest.fn(),
+    findFirst: jest.fn(),
+    findUnique: jest.fn(),
+    update: jest.fn(),
+    count: jest.fn(),
+    groupBy: jest.fn(),
+    aggregate: jest.fn(),
+  },
   $transaction: jest.fn((callback: (tx: typeof mockTx) => unknown) => callback(mockTx)),
 };
 
@@ -437,6 +445,161 @@ describe('OrdersService', () => {
           totalPages: 1,
         },
       });
+    });
+  });
+
+  describe('getOrderStats', () => {
+    it('returns total count, counts by status (completed, pending, etc.), revenue metrics, and recent orders with timestamps', async () => {
+      const mockStatusGroups = [
+        { status: OrderStatus.COMPLETED, _count: { _all: 50 }, _sum: { subtotal: 5000, deliveryFee: 200 } },
+        { status: OrderStatus.PENDING_PAYMENT, _count: { _all: 10 }, _sum: { subtotal: 1000, deliveryFee: 50 } },
+        { status: OrderStatus.CONFIRMED, _count: { _all: 5 }, _sum: { subtotal: 500, deliveryFee: 0 } },
+        { status: OrderStatus.PACKED, _count: { _all: 3 }, _sum: { subtotal: 300, deliveryFee: 0 } },
+        { status: OrderStatus.READY, _count: { _all: 2 }, _sum: { subtotal: 200, deliveryFee: 0 } },
+        { status: OrderStatus.CANCELLED, _count: { _all: 4 }, _sum: { subtotal: 400, deliveryFee: 0 } },
+      ];
+      const mockTotal = 74;
+      const mockCompletedAgg = { _sum: { subtotal: 5000, deliveryFee: 200 } };
+      const mockRecentOrders = [
+        {
+          id: 'order_recent_1',
+          orderNumber: 2001,
+          status: OrderStatus.COMPLETED,
+          paymentMethod: PaymentMethod.UPI,
+          fulfillmentMethod: FulfillmentMethod.DELIVERY,
+          deliveryLabel: 'Home',
+          deliveryLine1: '123 Test St',
+          deliveryLine2: null,
+          deliveryCity: 'Bhopal',
+          deliveryState: 'MP',
+          deliveryPincode: '462001',
+          subtotal: 250,
+          deliveryFee: 0,
+          createdAt: new Date('2026-09-30T10:00:00Z'),
+          updatedAt: new Date('2026-09-30T10:30:00Z'),
+          cancelledAt: null,
+          cancelReason: null,
+          customer: { id: 'cust_1', name: 'John Doe', phone: '9876543210' },
+          items: [
+            {
+              id: 'oi_1',
+              variantId: 'var_1',
+              productName: 'Tata Sugar',
+              sku: 'SUGAR-1KG',
+              unit: 'KG',
+              weight: 1,
+              unitPrice: 50,
+              quantity: 5,
+              lineTotal: 250,
+            },
+          ],
+          payments: [
+            {
+              id: 'pay_1',
+              provider: 'RAZORPAY',
+              providerOrderId: 'order_rzp_1',
+              providerPaymentId: 'pay_rzp_1',
+              amount: 250,
+              status: 'SUCCESS',
+              failureReason: null,
+              createdAt: new Date('2026-09-30T10:01:00Z'),
+            },
+          ],
+        },
+      ];
+
+      (mockPrismaService.$transaction as any).mockResolvedValue([
+        mockStatusGroups,
+        mockTotal,
+        mockCompletedAgg,
+        mockRecentOrders,
+      ]);
+
+      const result = await service.getOrderStats({ limit: 5 });
+
+      expect(result.summary.totalOrders).toBe(74);
+      expect(result.summary.completedOrders).toBe(50);
+      expect(result.summary.pendingOrders).toBe(10);
+      expect(result.summary.inProgressOrders).toBe(10); // 5 confirmed + 3 packed + 2 ready
+      expect(result.summary.activeUnfulfilledOrders).toBe(20); // 10 pending + 10 in-progress
+      expect(result.summary.cancelledOrders).toBe(4);
+      expect(result.summary.countsByStatus).toEqual({
+        [OrderStatus.PENDING_PAYMENT]: 10,
+        [OrderStatus.CONFIRMED]: 5,
+        [OrderStatus.PACKED]: 3,
+        [OrderStatus.READY]: 2,
+        [OrderStatus.COMPLETED]: 50,
+        [OrderStatus.CANCELLED]: 4,
+      });
+      expect(result.summary.completedRevenue).toBe(5200);
+      expect(result.summary.averageOrderValue).toBe(104);
+
+      expect(result.recentOrders).toHaveLength(1);
+      expect(result.recentOrders[0].id).toBe('order_recent_1');
+      expect(result.recentOrders[0].orderNumber).toBe(2001);
+      expect(result.recentOrders[0].total).toBe(250);
+      expect(result.recentOrders[0].totalItemsCount).toBe(1);
+      expect(result.recentOrders[0].totalQuantity).toBe(5);
+      expect(result.recentOrders[0].customer?.name).toBe('John Doe');
+      expect(result.recentOrders[0].deliveryAddress?.city).toBe('Bhopal');
+      expect(result.recentOrders[0].items[0].productName).toBe('Tata Sugar');
+    });
+  });
+
+  describe('getRecentOrders', () => {
+    it('calls getOrderStats and returns recent orders', async () => {
+      const mockRecentOrders = [
+        {
+          id: 'order_recent_1',
+          orderNumber: 2001,
+          status: OrderStatus.CONFIRMED,
+          paymentMethod: PaymentMethod.CASH,
+          fulfillmentMethod: FulfillmentMethod.PICKUP,
+          subtotal: 100,
+          deliveryFee: 0,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+          customer: null,
+          items: [],
+          payments: [],
+        },
+      ];
+
+      (mockPrismaService.$transaction as any).mockResolvedValue([
+        [],
+        1,
+        { _sum: {} },
+        mockRecentOrders,
+      ]);
+
+      const result = await service.getRecentOrders(5);
+      expect(result).toHaveLength(1);
+      expect(result[0].orderNumber).toBe(2001);
+    });
+  });
+
+  describe('getCustomerOrderStats', () => {
+    it('returns customer specific order stats and recent orders', async () => {
+      const mockStatusGroups = [
+        { status: OrderStatus.COMPLETED, _count: { _all: 3 } },
+        { status: OrderStatus.CONFIRMED, _count: { _all: 1 } },
+      ];
+      const mockRecent = [
+        { id: 'order_1', subtotal: 150, deliveryFee: 20, createdAt: new Date() },
+      ];
+
+      (mockPrismaService.$transaction as any).mockResolvedValue([
+        mockStatusGroups,
+        4,
+        mockRecent,
+      ]);
+
+      const result = await service.getCustomerOrderStats('cust_1');
+
+      expect(result.summary.totalOrders).toBe(4);
+      expect(result.summary.completedOrders).toBe(3);
+      expect(result.summary.inProgressOrders).toBe(1);
+      expect(result.recentOrders[0].total).toBe(170);
     });
   });
 });

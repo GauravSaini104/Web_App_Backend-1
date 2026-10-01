@@ -4,6 +4,7 @@ import { CreateOrderDto } from './dto/create-order.dto';
 import { CancelOrderDto } from './dto/cancel-order.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { QueryOrdersDto } from './dto/query-orders.dto';
+import { OrderStatsDto } from './dto/order-stats.dto';
 import { CustomerAuthGuard } from '../auth/guards/customer-auth.guard';
 import { StaffAuthGuard } from '../auth/guards/staff-auth.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
@@ -38,6 +39,13 @@ export class OrdersController {
     return this.ordersService.findMineAll(user.id);
   }
 
+  // Must come before 'mine/:id' below — otherwise "stats" would be matched as an id.
+  @Get('mine/stats')
+  @UseGuards(CustomerAuthGuard)
+  findMineStats(@CurrentUser() user: AuthenticatedUser) {
+    return this.ordersService.getCustomerOrderStats(user.id);
+  }
+
   @Get('mine/:id')
   @UseGuards(CustomerAuthGuard)
   findMineOne(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
@@ -55,6 +63,25 @@ export class OrdersController {
   }
 
   // ---- Staff routes ----
+
+  // Stats & Dashboard routes (Must come before ':id' below)
+  @Get('stats')
+  @UseGuards(StaffAuthGuard)
+  getOrderStats(@Query() query: OrderStatsDto) {
+    return this.ordersService.getOrderStats(query);
+  }
+
+  @Get('dashboard')
+  @UseGuards(StaffAuthGuard)
+  getDashboard(@Query() query: OrderStatsDto) {
+    return this.ordersService.getOrderStats(query);
+  }
+
+  @Get('recent')
+  @UseGuards(StaffAuthGuard)
+  getRecentOrders(@Query('limit') limit?: number) {
+    return this.ordersService.getRecentOrders(limit ? Number(limit) : 10);
+  }
 
   // Must come before ':id' below — otherwise "search" would be matched as an id.
   @Get('search')
