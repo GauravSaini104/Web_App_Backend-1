@@ -31,7 +31,7 @@ CREATE TABLE "products" (
     "sku" TEXT NOT NULL,
     "description" TEXT,
     "brandId" TEXT,
-    "categoryId" TEXT NOT NULL,a
+    "categoryId" TEXT NOT NULL,
     "mrp" DECIMAL(10,2) NOT NULL,
     "sellingPrice" DECIMAL(10,2) NOT NULL,
     "unit" TEXT NOT NULL,
