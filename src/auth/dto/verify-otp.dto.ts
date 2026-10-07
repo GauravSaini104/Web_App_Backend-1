@@ -1,4 +1,4 @@
-import { IsString, Length, Matches } from 'class-validator';
+import { IsOptional, IsString, Length, Matches } from 'class-validator';
 import { INDIAN_MOBILE_REGEX } from '../auth.constants';
 
 export class VerifyOtpDto {
@@ -9,4 +9,8 @@ export class VerifyOtpDto {
   @IsString()
   @Length(6, 6, { message: 'code must be exactly 6 digits' })
   code!: string;
+
+  @IsOptional()
+  @IsString()
+  referralCode?: string;
 }

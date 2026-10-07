@@ -13,6 +13,7 @@ import { OrdersModule } from './orders/orders.module';
 import { PaymentsModule } from './payments/payments.module';
 import { UploadsModule } from './uploads/uploads.module';
 import { StaffModule } from './staff/staff.module';
+import { AffiliatesModule } from './affiliates/affiliates.module';
 import { AppController } from './app.controller';
 
 @Module({      
@@ -23,6 +24,7 @@ import { AppController } from './app.controller';
     AuthModule,
     StaffModule,
     CustomersModule,
+    AffiliatesModule,
     CategoriesModule,
     BrandsModule,
     ProductsModule,

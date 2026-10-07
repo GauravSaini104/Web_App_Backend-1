@@ -36,7 +36,7 @@ export class AuthController {
   @Post(['customer/verify-otp', 'otp/verify'])
   @HttpCode(HttpStatus.OK)
   verifyOtp(@Body() dto: VerifyOtpDto) {
-    return this.authService.verifyOtp(dto.phone, dto.code);
+    return this.authService.verifyOtp(dto.phone, dto.code, dto.referralCode);
   }
 
   @Post('staff/register')

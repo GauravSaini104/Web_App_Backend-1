@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { AuthService } from './auth.service';
 import { PrismaService } from '../database/prisma.service';
 import { SmsService } from './sms.service';
+import { AffiliatesService } from '../affiliates/affiliates.service';
 
 // The installed @nestjs/jwt ships an ES module (its dist uses `import`
 // syntax), which Jest's CommonJS runtime can't parse directly. Mocking the
@@ -26,6 +27,11 @@ const mockJwtService = {
 };
 
 const mockSmsService = { isConfigured: jest.fn(), sendOtp: jest.fn() };
+const mockAffiliatesService = {
+  resolveApprovedAffiliateId: jest.fn().mockResolvedValue(null),
+  getAffiliateIfActive: jest.fn().mockResolvedValue(null),
+  bookCommissionForOrder: jest.fn().mockResolvedValue(undefined),
+};
 
 describe('AuthService', () => {
   let service: AuthService;
@@ -45,6 +51,7 @@ describe('AuthService', () => {
         { provide: JwtService, useValue: mockJwtService },
         { provide: ConfigService, useValue: mockConfigService },
         { provide: SmsService, useValue: mockSmsService },
+        { provide: AffiliatesService, useValue: mockAffiliatesService },
       ],
     }).compile();
 

@@ -33,6 +33,13 @@ model Customer {
   cartItems CartItem[]
   orders    Order[]
 
+  referredByAffiliateId String?
+  referredByAffiliate   AffiliateProfile? @relation("AffiliateReferredCustomers", fields: [referredByAffiliateId], references: [id], onDelete: SetNull)
+  referralCodeUsed      String?
+  referredAt            DateTime?
+  affiliateProfile      AffiliateProfile?
+
+  @@index([referredByAffiliateId])
   @@map("customers")
 }
 
@@ -86,6 +93,10 @@ model StaffUser {
   isActive     Boolean  @default(true)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+
+  reviewedAffiliates AffiliateProfile[]
+  createdAdjustments AffiliateEarning[]
+  processedPayouts   AffiliatePayout[]
 
   @@map("staff_users")
 }
@@ -279,8 +290,14 @@ model Order {
   inventoryTransactions InventoryTransaction[]
   payments              Payment[]
 
+  affiliateId           String?
+  affiliate             AffiliateProfile?  @relation(fields: [affiliateId], references: [id], onDelete: Restrict)
+  commissionRateApplied Decimal?           @db.Decimal(5, 2)
+  affiliateEarnings     AffiliateEarning[]
+
   @@index([customerId])
   @@index([status])
+  @@index([affiliateId])
   @@map("orders")
 }
 
@@ -462,3 +479,132 @@ model InventoryTransaction {
   @@index([createdAt])
   @@map("inventory_transactions")
 }
+
+// ---------------------------------------------------------------------------
+// Affiliate Programme
+// ---------------------------------------------------------------------------
+
+enum AffiliateStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  SUSPENDED
+}
+
+enum AffiliateEarningType {
+  COMMISSION
+  ADJUSTMENT
+  PAYOUT
+}
+
+enum AffiliateEarningStatus {
+  PENDING
+  AVAILABLE
+}
+
+enum AffiliatePayoutStatus {
+  REQUESTED
+  PAID
+  REJECTED
+}
+
+model AffiliateProfile {
+  id              String          @id @default(cuid())
+  customerId      String          @unique
+  customer        Customer        @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  status          AffiliateStatus @default(PENDING)
+  referralCode    String          @unique
+  upiId           String?
+  upiName         String?
+
+  // Application answers
+  primaryChannel  String
+  channelUrl      String?
+  audienceSize    String?
+  motivation      String?
+
+  // Review audit
+  reviewedAt      DateTime?
+  reviewedById    String?
+  reviewedBy      StaffUser?      @relation(fields: [reviewedById], references: [id], onDelete: SetNull)
+  rejectionReason String?
+  staffNotes      String?
+
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  referredCustomers Customer[]         @relation("AffiliateReferredCustomers")
+  orders            Order[]
+  earnings          AffiliateEarning[]
+  payouts           AffiliatePayout[]
+
+  @@index([status])
+  @@index([createdAt])
+  @@map("affiliate_profiles")
+}
+
+model AffiliateEarning {
+  id                String                 @id @default(cuid())
+  affiliateId       String
+  affiliate         AffiliateProfile       @relation(fields: [affiliateId], references: [id], onDelete: Restrict)
+  amount            Decimal                @db.Decimal(10, 2)
+  type              AffiliateEarningType
+  status            AffiliateEarningStatus @default(AVAILABLE)
+
+  orderId           String?
+  order             Order?                 @relation(fields: [orderId], references: [id], onDelete: Restrict)
+
+  baseAmount        Decimal?               @db.Decimal(10, 2)
+  rateApplied       Decimal?               @db.Decimal(5, 2)
+
+  reversesEarningId String?                @unique
+  reversesEarning   AffiliateEarning?      @relation("EarningReversals", fields: [reversesEarningId], references: [id], onDelete: Restrict)
+  reversedBy        AffiliateEarning?      @relation("EarningReversals")
+
+  description       String?
+  createdById       String?
+  createdBy         StaffUser?             @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  availableAt       DateTime               @default(now())
+  createdAt         DateTime               @default(now())
+
+  @@index([affiliateId, status])
+  @@index([affiliateId, type])
+  @@index([orderId])
+  @@map("affiliate_earnings")
+}
+
+model AffiliatePayout {
+  id              String                @id @default(cuid())
+  affiliateId     String
+  affiliate       AffiliateProfile      @relation(fields: [affiliateId], references: [id], onDelete: Restrict)
+  amount          Decimal               @db.Decimal(10, 2)
+  upiId           String
+  status          AffiliatePayoutStatus @default(REQUESTED)
+
+  requestedAt     DateTime              @default(now())
+  processedAt     DateTime?
+  processedById   String?
+  processedBy     StaffUser?            @relation(fields: [processedById], references: [id], onDelete: SetNull)
+
+  transactionRef  String?
+  notes           String?
+  rejectionReason String?
+
+  @@index([status, requestedAt])
+  @@index([affiliateId])
+  @@map("affiliate_payouts")
+}
+
+model AffiliateSettings {
+  id              Int      @id @default(1)
+  commissionRate  Decimal  @default(5.00) @db.Decimal(5, 2)
+  minPayoutAmount Decimal  @default(500.00) @db.Decimal(10, 2)
+  holdDays        Int      @default(0)
+  isProgrammeOpen Boolean  @default(true)
+  termsVersion    String?
+  updatedAt       DateTime @updatedAt
+
+  @@map("affiliate_settings")
+}
+

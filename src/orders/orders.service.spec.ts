@@ -23,6 +23,7 @@ const mockTx = {
 const mockPrismaService = {
   cartItem: { findMany: jest.fn() },
   address: { findFirst: jest.fn() },
+  customer: { findUnique: jest.fn().mockResolvedValue(null) },
   order: {
     findMany: jest.fn(),
     findFirst: jest.fn(),
@@ -37,10 +38,16 @@ const mockPrismaService = {
 
 import { SmsService } from '../auth/sms.service';
 import { PaymentsService } from '../payments/payments.service';
+import { AffiliatesService } from '../affiliates/affiliates.service';
 
 const mockInventoryService = {
   reserveStockTx: jest.fn(),
   releaseReservationTx: jest.fn(),
+};
+
+const mockAffiliatesService = {
+  getAffiliateIfActive: jest.fn().mockResolvedValue(null),
+  bookCommissionForOrder: jest.fn().mockResolvedValue(undefined),
 };
 
 const mockSmsService = {
@@ -89,6 +96,7 @@ describe('OrdersService', () => {
         { provide: ConfigService, useValue: mockConfigService },
         { provide: SmsService, useValue: mockSmsService },
         { provide: PaymentsService, useValue: mockPaymentsService },
+        { provide: AffiliatesService, useValue: mockAffiliatesService },
       ],
     }).compile();
 

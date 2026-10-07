@@ -14,6 +14,7 @@ import { createHash } from 'node:crypto';
 import { PrismaService } from '../database/prisma.service';
 import { handlePrismaError } from '../common/utils/prisma-error.util';
 import { SmsService } from './sms.service';
+import { AffiliatesService } from '../affiliates/affiliates.service';
 import { StaffRegisterDto } from './dto/staff-register.dto';
 import { StaffLoginDto } from './dto/staff-login.dto';
 import { AuthenticatedUser } from './strategies/jwt.strategy';
@@ -35,6 +36,7 @@ export class AuthService {
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     private readonly smsService: SmsService,
+    private readonly affiliatesService: AffiliatesService,
   ) {}
 
   /**
@@ -91,7 +93,7 @@ export class AuthService {
     }
   }
 
-  async verifyOtp(phone: string, code: string) {
+  async verifyOtp(phone: string, code: string, referralCode?: string) {
     const otpRequest = await this.prisma.otpRequest.findFirst({
       where: { phone, consumedAt: null, expiresAt: { gt: new Date() } },
       orderBy: { createdAt: 'desc' },
@@ -117,10 +119,21 @@ export class AuthService {
       data: { consumedAt: new Date() },
     });
 
+    // Resolve referral code if provided (Hook A: attribution set only on customer creation)
+    const affiliateId = referralCode
+      ? await this.affiliatesService.resolveApprovedAffiliateId(referralCode)
+      : null;
+
     const customer = await this.prisma.customer.upsert({
       where: { phone },
       update: { isPhoneVerified: true },
-      create: { phone, isPhoneVerified: true },
+      create: {
+        phone,
+        isPhoneVerified: true,
+        referredByAffiliateId: affiliateId,
+        referralCodeUsed: affiliateId && referralCode ? referralCode.toUpperCase() : null,
+        referredAt: affiliateId ? new Date() : null,
+      },
     });
 
     this.userRevokedAt.delete(customer.id);

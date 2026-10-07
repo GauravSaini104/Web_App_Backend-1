@@ -13,6 +13,7 @@ import { PrismaService } from '../database/prisma.service';
 import { InventoryService } from '../inventory/inventory.service';
 import { SmsService } from '../auth/sms.service';
 import { PaymentsService } from '../payments/payments.service';
+import { AffiliatesService } from '../affiliates/affiliates.service';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { CancelOrderDto } from './dto/cancel-order.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
@@ -34,6 +35,7 @@ export class OrdersService {
     private readonly smsService: SmsService,
     @Inject(forwardRef(() => PaymentsService))
     private readonly paymentsService: PaymentsService,
+    private readonly affiliatesService: AffiliatesService,
   ) {}
 
   /**
@@ -97,11 +99,21 @@ export class OrdersService {
         ? OrderStatus.CONFIRMED
         : OrderStatus.PENDING_PAYMENT;
 
+    // Check if customer was referred by an active affiliate (Hook B: snapshot on order)
+    const customer = await this.prisma.customer.findUnique({
+      where: { id: customerId },
+      select: { referredByAffiliateId: true },
+    });
+    const affiliateId = customer?.referredByAffiliateId
+      ? await this.affiliatesService.getAffiliateIfActive(customer.referredByAffiliateId)
+      : null;
+
     return this.prisma
       .$transaction(async (tx) => {
         const order = await tx.order.create({
           data: {
             customerId,
+            affiliateId,
             status: initialStatus,
             paymentMethod: dto.paymentMethod,
             fulfillmentMethod: dto.fulfillmentMethod,
@@ -528,6 +540,11 @@ export class OrdersService {
       where: { id: orderId },
       data: { status: dto.status },
     });
+
+    // Hook B: Idempotently book commission when order is completed
+    if (dto.status === OrderStatus.COMPLETED) {
+      await this.affiliatesService.bookCommissionForOrder(updated.id);
+    }
 
     await this.notifyCustomerOrderStatus(orderId, dto.status);
 
