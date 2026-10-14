@@ -3,6 +3,7 @@ import { NestExpressApplication } from '@nestjs/platform-express';
 import { Logger, ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { join } from 'node:path';
+import { Request, Response, NextFunction } from 'express';
 import { AppModule } from './app.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
@@ -16,6 +17,16 @@ async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, { rawBody: true });
   const configService = app.get(ConfigService);
   const logger = new Logger('Bootstrap');
+  const httpLogger = new Logger('HTTP');
+
+  // Log all incoming HTTP requests in real-time for live observability (e.g. PM2 logs)
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    const start = Date.now();
+    res.on('finish', () => {
+      httpLogger.log(`${req.method} ${req.originalUrl} ${res.statusCode} - ${Date.now() - start}ms`);
+    });
+    next();
+  });
 
   // Uploaded product photos are saved to disk and served back from here —
   // e.g. a file saved to uploads/products/abc.jpg is reachable at
