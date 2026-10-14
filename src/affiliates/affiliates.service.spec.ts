@@ -196,7 +196,7 @@ describe('AffiliatesService', () => {
             amount: new Prisma.Decimal(50.0), // 5% of 1000
             type: AffiliateEarningType.COMMISSION,
             status: AffiliateEarningStatus.AVAILABLE,
-          }),
+          }),  
         }),
       );
     });
