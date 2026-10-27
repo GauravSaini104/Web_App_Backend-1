@@ -299,5 +299,18 @@ describe('AffiliatesService', () => {
         data: { customCommissionRate: null },
       });
     });
+
+    it('should throw BadRequestException when customCommissionRate is undefined', async () => {
+      await expect(
+        service.updateAffiliateCommission('aff-1', {} as any),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('should throw NotFoundException when affiliate profile is not found', async () => {
+      mockPrismaService.affiliateProfile.findUnique.mockResolvedValue(null);
+      await expect(
+        service.updateAffiliateCommission('aff-unknown', { customCommissionRate: 10 }),
+      ).rejects.toThrow(NotFoundException);
+    });
   });
 });

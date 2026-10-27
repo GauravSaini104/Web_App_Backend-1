@@ -870,23 +870,32 @@ export class AffiliatesService {
       throw new BadRequestException('Rejection reason is required when rejecting an application');
     }
 
-    return await this.prisma.affiliateProfile.update({
-      where: { id },
-      data: {
-        status: dto.status,
-        reviewedAt: new Date(),
-        reviewedById: staffId,
-        ...(dto.rejectionReason !== undefined && { rejectionReason: dto.rejectionReason }),
-        ...(dto.staffNotes !== undefined && { staffNotes: dto.staffNotes }),
-        ...(dto.customCommissionRate !== undefined && {
-          customCommissionRate:
-            dto.customCommissionRate !== null ? new Prisma.Decimal(dto.customCommissionRate) : null,
-        }),
-      },
-    });
+    try {
+      return await this.prisma.affiliateProfile.update({
+        where: { id },
+        data: {
+          status: dto.status,
+          reviewedAt: new Date(),
+          reviewedById: staffId,
+          ...(dto.rejectionReason !== undefined && { rejectionReason: dto.rejectionReason }),
+          ...(dto.staffNotes !== undefined && { staffNotes: dto.staffNotes }),
+          ...(dto.customCommissionRate !== undefined && {
+            customCommissionRate:
+              dto.customCommissionRate !== null ? new Prisma.Decimal(dto.customCommissionRate) : null,
+          }),
+        },
+      });
+    } catch (error) {
+      handlePrismaError(error, 'Affiliate profile');
+    }
   }
-
   async updateAffiliateCommission(id: string, dto: UpdateAffiliateCommissionDto) {
+    if (dto.customCommissionRate === undefined) {
+      throw new BadRequestException(
+        'customCommissionRate must be provided (a number between 0 and 100, or null to clear)',
+      );
+    }
+
     const profile = await this.prisma.affiliateProfile.findUnique({
       where: { id },
     });
@@ -895,31 +904,35 @@ export class AffiliatesService {
     }
 
     const settings = await this.getOrCreateSettings();
-    const updated = await this.prisma.affiliateProfile.update({
-      where: { id },
-      data: {
-        customCommissionRate:
-          dto.customCommissionRate !== undefined && dto.customCommissionRate !== null
-            ? new Prisma.Decimal(dto.customCommissionRate)
-            : null,
-      },
-    });
+    try {
+      const updated = await this.prisma.affiliateProfile.update({
+        where: { id },
+        data: {
+          customCommissionRate:
+            dto.customCommissionRate !== null
+              ? new Prisma.Decimal(dto.customCommissionRate)
+              : null,
+        },
+      });
 
-    const globalCommissionRate = Number(settings.commissionRate);
-    const customCommissionRate =
-      updated.customCommissionRate != null ? Number(updated.customCommissionRate) : null;
-    const effectiveCommissionRate =
-      customCommissionRate != null ? customCommissionRate : globalCommissionRate;
+      const globalCommissionRate = Number(settings.commissionRate);
+      const customCommissionRate =
+        updated.customCommissionRate != null ? Number(updated.customCommissionRate) : null;
+      const effectiveCommissionRate =
+        customCommissionRate != null ? customCommissionRate : globalCommissionRate;
 
-    return {
-      id: updated.id,
-      referralCode: updated.referralCode,
-      globalCommissionRate,
-      customCommissionRate,
-      effectiveCommissionRate,
-      isCustomRate: customCommissionRate != null,
-      updatedAt: updated.updatedAt,
-    };
+      return {
+        id: updated.id,
+        referralCode: updated.referralCode,
+        globalCommissionRate,
+        customCommissionRate,
+        effectiveCommissionRate,
+        isCustomRate: customCommissionRate != null,
+        updatedAt: updated.updatedAt,
+      };
+    } catch (error) {
+      handlePrismaError(error, 'Affiliate profile');
+    }
   }
 
   async findAllPayouts(query: PaginationQueryDto & { status?: AffiliatePayoutStatus }) {

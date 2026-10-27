@@ -44,8 +44,36 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
    */
   onModuleInit() {
     this.$connect()
-      .then(() => this.logger.log('Connected to PostgreSQL via Prisma'))
+      .then(async () => {
+        this.logger.log('Connected to PostgreSQL via Prisma');
+        await this.autoMigrate();
+      })
       .catch((error: Error) => this.logger.error('Failed to connect to PostgreSQL', error.stack));
+  }
+
+  /**
+   * Automatically applies any pending Prisma migrations on startup.
+   * This guarantees that whenever new columns, tables, or indexes are
+   * added to schema.prisma, PostgreSQL is immediately updated without
+   * requiring manual terminal intervention or causing runtime "column does not exist" errors.
+   */
+  private async autoMigrate() {
+    if (process.env.NODE_ENV === 'test' || process.env.AUTO_MIGRATE === 'false') {
+      return;
+    }
+
+    try {
+      const { exec } = await import('node:child_process');
+      const { promisify } = await import('node:util');
+      const execAsync = promisify(exec);
+
+      const { stdout } = await execAsync('npx prisma migrate deploy');
+      if (stdout && stdout.toLowerCase().includes('applying migration')) {
+        this.logger.log(`Database auto-migration applied successfully:\n${stdout.trim()}`);
+      }
+    } catch (err: any) {
+      this.logger.warn(`Database auto-migration check: ${err?.message ?? err}`);
+    }
   }
 
   async onModuleDestroy() {
