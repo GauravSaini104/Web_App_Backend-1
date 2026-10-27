@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 import { InventoryTransactionType, Prisma, UnitOfMeasure } from '@prisma/client';
 import { Request } from 'express';
 import { existsSync, unlinkSync } from 'node:fs';
@@ -82,10 +82,45 @@ export class ProductsService {
     };
   }
 
+  private cleanupUploadedFiles(files?: Express.Multer.File[]) {
+    if (!files || files.length === 0) return;
+    for (const file of files) {
+      if (file.path && existsSync(file.path)) {
+        try {
+          unlinkSync(file.path);
+        } catch {
+          // ignore cleanup error
+        }
+      }
+    }
+  }
+
   async create(dto: CreateProductDto, files?: Express.Multer.File[], req?: Request) {
     dto.variants.forEach((variant) =>
       this.assertSellingPriceValid(variant.mrp, variant.sellingPrice),
     );
+
+    // Validate SKU uniqueness upfront before writing or database transactions
+    const incomingSkus = dto.variants.map((v) => (v.sku || '').trim());
+    const duplicateIncoming = incomingSkus.filter((sku, index) => incomingSkus.indexOf(sku) !== index);
+    if (duplicateIncoming.length > 0) {
+      this.cleanupUploadedFiles(files);
+      throw new BadRequestException(`Duplicate SKU '${duplicateIncoming[0]}' specified in variants list`);
+    }
+
+    const existingVariant = await this.prisma.productVariant.findFirst({
+      where: {
+        sku: {
+          in: incomingSkus,
+          mode: 'insensitive',
+        },
+      },
+    });
+
+    if (existingVariant) {
+      this.cleanupUploadedFiles(files);
+      throw new ConflictException(`Product with SKU '${existingVariant.sku}' already exists`);
+    }
 
     // Handle physical uploaded files if provided
     if (files && files.length > 0) {
@@ -160,6 +195,7 @@ export class ProductsService {
       });
       return this.formatProduct(product);
     } catch (error) {
+      this.cleanupUploadedFiles(files);
       handlePrismaError(error, 'Product');
     }
   }

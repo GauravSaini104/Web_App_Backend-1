@@ -1,5 +1,6 @@
 import { AffiliateStatus } from '@prisma/client';
-import { IsEnum, IsOptional, IsString, MaxLength } from 'class-validator';
+import { Type } from 'class-transformer';
+import { IsEnum, IsNumber, IsOptional, IsString, Max, MaxLength, Min, ValidateIf } from 'class-validator';
 
 export class ReviewAffiliateDto {
   @IsEnum(AffiliateStatus, {
@@ -16,4 +17,12 @@ export class ReviewAffiliateDto {
   @IsString()
   @MaxLength(1000)
   staffNotes?: string;
+
+  @IsOptional()
+  @ValidateIf((_, value) => value !== null)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(0)
+  @Max(100)
+  @Type(() => Number)
+  customCommissionRate?: number | null;
 }

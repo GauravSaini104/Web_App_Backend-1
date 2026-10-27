@@ -11,7 +11,7 @@ export const ALLOWED_IMAGE_MIME_TYPES: Record<string, string> = {
   'image/webp': '.webp',
 };
 
-export const MAX_IMAGE_FILE_SIZE_BYTES = 5 * 1024 * 1024; // 5MB
+export const MAX_IMAGE_FILE_SIZE_BYTES = 25 * 1024 * 1024; // 25MB (supports modern high-resolution phone cameras)
 export const PRODUCT_UPLOAD_DIR = join(process.cwd(), 'uploads', 'products');
 export const CATEGORY_UPLOAD_DIR = join(process.cwd(), 'uploads', 'categories');
 
@@ -62,7 +62,7 @@ export const PRODUCT_MULTER_OPTIONS = {
       callback(null, `${randomUUID()}${ALLOWED_IMAGE_MIME_TYPES[file.mimetype] ?? '.jpg'}`);
     },
   }),
-  limits: { fileSize: MAX_IMAGE_FILE_SIZE_BYTES },
+  limits: { fileSize: MAX_IMAGE_FILE_SIZE_BYTES, fieldSize: 25 * 1024 * 1024 },
   fileFilter: (_req: any, file: any, callback: any) => {
     if (!ALLOWED_IMAGE_MIME_TYPES[file.mimetype]) {
       callback(new BadRequestException('Only JPEG, PNG, or WEBP images are allowed'), false);
@@ -79,7 +79,7 @@ export const CATEGORY_MULTER_OPTIONS = {
       callback(null, `${randomUUID()}${ALLOWED_IMAGE_MIME_TYPES[file.mimetype] ?? '.jpg'}`);
     },
   }),
-  limits: { fileSize: MAX_IMAGE_FILE_SIZE_BYTES },
+  limits: { fileSize: MAX_IMAGE_FILE_SIZE_BYTES, fieldSize: 25 * 1024 * 1024 },
   fileFilter: (_req: any, file: any, callback: any) => {
     if (!ALLOWED_IMAGE_MIME_TYPES[file.mimetype]) {
       callback(new BadRequestException('Only JPEG, PNG, or WEBP images are allowed'), false);

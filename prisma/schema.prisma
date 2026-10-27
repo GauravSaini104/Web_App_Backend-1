@@ -516,6 +516,7 @@ model AffiliateProfile {
   referralCode    String          @unique
   upiId           String?
   upiName         String?
+  customCommissionRate Decimal? @db.Decimal(5, 2)
 
   // Application answers
   primaryChannel  String

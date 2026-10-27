@@ -9,6 +9,8 @@ import { Prisma } from '@prisma/client';
 const FIELD_LABELS: Record<string, string> = {
   slug: 'name',
   sku: 'SKU/barcode',
+  product_variants_sku_key: 'SKU/barcode',
+  products_slug_key: 'name/slug',
 };
 
 /**
@@ -24,8 +26,22 @@ const FIELD_LABELS: Record<string, string> = {
 export function handlePrismaError(error: unknown, entityName: string): never {
   if (error instanceof Prisma.PrismaClientKnownRequestError) {
     if (error.code === 'P2002') {
-      const target = (error.meta?.target as string[] | undefined) ?? [];
-      const label = target.map((field) => FIELD_LABELS[field] ?? field).join(', ') || 'value';
+      const rawTarget = error.meta?.target;
+      const target = Array.isArray(rawTarget)
+        ? rawTarget
+        : typeof rawTarget === 'string'
+        ? [rawTarget]
+        : [];
+
+      const targetStr = target.join(' ').toLowerCase();
+      let label = 'value';
+      if (targetStr.includes('sku')) {
+        label = 'SKU/barcode';
+      } else if (targetStr.includes('slug')) {
+        label = 'name';
+      } else {
+        label = target.map((field) => FIELD_LABELS[field] ?? field).join(', ') || 'value';
+      }
       throw new ConflictException(`${entityName} with this ${label} already exists`);
     }
     if (error.code === 'P2025') {

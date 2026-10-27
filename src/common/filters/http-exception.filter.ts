@@ -27,7 +27,19 @@ export class HttpExceptionFilter implements ExceptionFilter {
     let message: string | string[] = 'Internal server error';
     let error = 'Internal Server Error';
 
-    if (exception instanceof HttpException) {
+    // Handle Multer errors explicitly (e.g. LIMIT_FILE_SIZE, LIMIT_FIELD_VALUE)
+    if (exception && typeof exception === 'object' && 'name' in exception && (exception as any).name === 'MulterError') {
+      const multerErr = exception as any;
+      status = HttpStatus.PAYLOAD_TOO_LARGE;
+      error = 'Payload Too Large';
+      if (multerErr.code === 'LIMIT_FILE_SIZE') {
+        message = 'Uploaded image file is too large. Maximum allowed size is 25MB.';
+      } else if (multerErr.code === 'LIMIT_FIELD_VALUE') {
+        message = 'Request payload field is too large. Please shorten the input data.';
+      } else {
+        message = multerErr.message || 'File upload error';
+      }
+    } else if (exception instanceof HttpException) {
       status = exception.getStatus();
       const body = exception.getResponse();
       if (typeof body === 'string') {
@@ -36,6 +48,9 @@ export class HttpExceptionFilter implements ExceptionFilter {
         const bodyObj = body as Record<string, unknown>;
         message = (bodyObj.message as string | string[]) ?? exception.message;
         error = (bodyObj.error as string) ?? exception.name;
+      }
+      if (status === HttpStatus.PAYLOAD_TOO_LARGE) {
+        message = 'Request or uploaded file size is too large (maximum allowed size is 25MB).';
       }
     } else if (exception instanceof Error) {
       message = exception.message;

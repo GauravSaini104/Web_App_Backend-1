@@ -1,5 +1,5 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { ProductsService } from './products.service';
 import { PrismaService } from '../database/prisma.service';
 
@@ -88,6 +88,29 @@ describe('ProductsService', () => {
       };
 
       await expect(service.create(invalidDto as any)).rejects.toThrow(BadRequestException);
+      expect(mockPrismaService.product.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects product creation when duplicate SKUs are passed in variants list', async () => {
+      const dtoWithDuplicateSkus = {
+        ...validDto,
+        variants: [
+          { sku: 'SUGAR-1KG', mrp: 50, sellingPrice: 40, unit: 'KG', weight: 1 },
+          { sku: 'SUGAR-1KG', mrp: 100, sellingPrice: 80, unit: 'KG', weight: 2 },
+        ],
+      };
+
+      await expect(service.create(dtoWithDuplicateSkus as any)).rejects.toThrow(BadRequestException);
+      expect(mockPrismaService.product.create).not.toHaveBeenCalled();
+    });
+
+    it('rejects product creation when SKU already exists in database with ConflictException', async () => {
+      mockPrismaService.productVariant.findFirst.mockResolvedValueOnce({
+        id: 'var_existing',
+        sku: 'SUGAR-1KG',
+      });
+
+      await expect(service.create(validDto as any)).rejects.toThrow(ConflictException);
       expect(mockPrismaService.product.create).not.toHaveBeenCalled();
     });
 

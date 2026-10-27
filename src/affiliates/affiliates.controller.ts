@@ -23,6 +23,7 @@ import { ReviewAffiliateDto } from './dto/review-affiliate.dto';
 import { ReviewPayoutDto } from './dto/review-payout.dto';
 import { CreateAdjustmentDto } from './dto/create-adjustment.dto';
 import { UpdateSettingsDto } from './dto/update-settings.dto';
+import { UpdateAffiliateCommissionDto } from './dto/update-affiliate-commission.dto';
 import { QueryAffiliatesDto } from './dto/query-affiliates.dto';
 import { AffiliateStatsQueryDto } from './dto/affiliate-stats-query.dto';
 import { QueryEarningsDto } from './dto/query-earnings.dto';
@@ -166,6 +167,15 @@ export class AffiliatesController {
     @CurrentUser() user: AuthenticatedUser,
   ) {
     return this.affiliatesService.updateAffiliateStatus(id, dto, user.id);
+  }
+
+  @Patch(':id/commission')
+  @UseGuards(StaffAuthGuard)
+  updateCommissionRate(
+    @Param('id') id: string,
+    @Body() dto: UpdateAffiliateCommissionDto,
+  ) {
+    return this.affiliatesService.updateAffiliateCommission(id, dto);
   }
 
   @Post(':id/adjustment')

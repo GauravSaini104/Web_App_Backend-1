@@ -31,6 +31,7 @@ import { ReviewAffiliateDto } from './dto/review-affiliate.dto';
 import { ReviewPayoutDto } from './dto/review-payout.dto';
 import { CreateAdjustmentDto } from './dto/create-adjustment.dto';
 import { UpdateSettingsDto } from './dto/update-settings.dto';
+import { UpdateAffiliateCommissionDto } from './dto/update-affiliate-commission.dto';
 import { QueryAffiliatesDto } from './dto/query-affiliates.dto';
 import { AffiliateStatsQueryDto } from './dto/affiliate-stats-query.dto';
 import { QueryEarningsDto } from './dto/query-earnings.dto';
@@ -226,6 +227,10 @@ export class AffiliatesService {
 
     const balances = calculateBalances(profile.earnings, profile.payouts);
     const settings = await this.getOrCreateSettings();
+    const effectiveCommissionRate =
+      profile.customCommissionRate != null
+        ? Number(profile.customCommissionRate)
+        : Number(settings.commissionRate);
 
     return {
       id: profile.id,
@@ -237,7 +242,10 @@ export class AffiliatesService {
       channelUrl: profile.channelUrl,
       rejectionReason: profile.rejectionReason,
       createdAt: profile.createdAt,
-      commissionRate: Number(settings.commissionRate),
+      commissionRate: effectiveCommissionRate,
+      customCommissionRate:
+        profile.customCommissionRate != null ? Number(profile.customCommissionRate) : null,
+      isCustomRate: profile.customCommissionRate != null,
       minPayoutAmount: Number(settings.minPayoutAmount),
       balances,
     };
@@ -645,8 +653,18 @@ export class AffiliatesService {
       return;
     }
 
-    const settings = await this.getOrCreateSettings();
-    const rate = Number(settings.commissionRate);
+    const [settings, affiliate] = await Promise.all([
+      this.getOrCreateSettings(),
+      this.prisma.affiliateProfile.findUnique({
+        where: { id: order.affiliateId },
+        select: { customCommissionRate: true },
+      }),
+    ]);
+
+    const rate =
+      affiliate?.customCommissionRate != null
+        ? Number(affiliate.customCommissionRate)
+        : Number(settings.commissionRate);
     const subtotal = Number(order.subtotal);
     const commissionAmount = Math.round(((subtotal * rate) / 100) * 100) / 100;
 
@@ -673,6 +691,15 @@ export class AffiliatesService {
         availableAt,
       },
     });
+
+    await this.prisma.order
+      .update({
+        where: { id: order.id },
+        data: { commissionRateApplied: new Prisma.Decimal(rate) },
+      })
+      .catch((err) => {
+        this.logger.warn(`Could not set commissionRateApplied on order ${order.id}: ${err.message}`);
+      });
 
     this.logger.log(
       `Booked commission ₹${commissionAmount} for affiliate ${order.affiliateId} on order #${order.orderNumber}`,
@@ -702,7 +729,7 @@ export class AffiliatesService {
       }),
     };
 
-    const [profiles, total] = await Promise.all([
+    const [profiles, total, settings] = await Promise.all([
       this.prisma.affiliateProfile.findMany({
         where,
         include: {
@@ -721,10 +748,18 @@ export class AffiliatesService {
         take: limit,
       }),
       this.prisma.affiliateProfile.count({ where }),
+      this.getOrCreateSettings(),
     ]);
+
+    const globalCommissionRate = Number(settings.commissionRate);
 
     const items = profiles.map((p) => {
       const balances = calculateBalances(p.earnings, p.payouts);
+      const customCommissionRate =
+        p.customCommissionRate != null ? Number(p.customCommissionRate) : null;
+      const effectiveCommissionRate =
+        customCommissionRate != null ? customCommissionRate : globalCommissionRate;
+
       return {
         id: p.id,
         customerId: p.customerId,
@@ -734,6 +769,9 @@ export class AffiliatesService {
         referralCode: p.referralCode,
         upiId: p.upiId,
         upiName: p.upiName,
+        customCommissionRate,
+        effectiveCommissionRate,
+        isCustomRate: customCommissionRate != null,
         primaryChannel: p.primaryChannel,
         channelUrl: p.channelUrl,
         audienceSize: p.audienceSize,
@@ -791,19 +829,31 @@ export class AffiliatesService {
       throw new NotFoundException('Affiliate profile not found');
     }
 
-    const allEarnings = await this.prisma.affiliateEarning.findMany({
-      where: { affiliateId: profile.id },
-      select: { amount: true, type: true, status: true },
-    });
-    const allPayouts = await this.prisma.affiliatePayout.findMany({
-      where: { affiliateId: profile.id },
-      select: { amount: true, status: true },
-    });
+    const [allEarnings, allPayouts, settings] = await Promise.all([
+      this.prisma.affiliateEarning.findMany({
+        where: { affiliateId: profile.id },
+        select: { amount: true, type: true, status: true },
+      }),
+      this.prisma.affiliatePayout.findMany({
+        where: { affiliateId: profile.id },
+        select: { amount: true, status: true },
+      }),
+      this.getOrCreateSettings(),
+    ]);
 
     const balances = calculateBalances(allEarnings, allPayouts);
+    const globalCommissionRate = Number(settings.commissionRate);
+    const customCommissionRate =
+      profile.customCommissionRate != null ? Number(profile.customCommissionRate) : null;
+    const effectiveCommissionRate =
+      customCommissionRate != null ? customCommissionRate : globalCommissionRate;
 
     return {
       ...profile,
+      globalCommissionRate,
+      customCommissionRate,
+      effectiveCommissionRate,
+      isCustomRate: customCommissionRate != null,
       balances,
     };
   }
@@ -828,8 +878,48 @@ export class AffiliatesService {
         reviewedById: staffId,
         ...(dto.rejectionReason !== undefined && { rejectionReason: dto.rejectionReason }),
         ...(dto.staffNotes !== undefined && { staffNotes: dto.staffNotes }),
+        ...(dto.customCommissionRate !== undefined && {
+          customCommissionRate:
+            dto.customCommissionRate !== null ? new Prisma.Decimal(dto.customCommissionRate) : null,
+        }),
       },
     });
+  }
+
+  async updateAffiliateCommission(id: string, dto: UpdateAffiliateCommissionDto) {
+    const profile = await this.prisma.affiliateProfile.findUnique({
+      where: { id },
+    });
+    if (!profile) {
+      throw new NotFoundException('Affiliate profile not found');
+    }
+
+    const settings = await this.getOrCreateSettings();
+    const updated = await this.prisma.affiliateProfile.update({
+      where: { id },
+      data: {
+        customCommissionRate:
+          dto.customCommissionRate !== undefined && dto.customCommissionRate !== null
+            ? new Prisma.Decimal(dto.customCommissionRate)
+            : null,
+      },
+    });
+
+    const globalCommissionRate = Number(settings.commissionRate);
+    const customCommissionRate =
+      updated.customCommissionRate != null ? Number(updated.customCommissionRate) : null;
+    const effectiveCommissionRate =
+      customCommissionRate != null ? customCommissionRate : globalCommissionRate;
+
+    return {
+      id: updated.id,
+      referralCode: updated.referralCode,
+      globalCommissionRate,
+      customCommissionRate,
+      effectiveCommissionRate,
+      isCustomRate: customCommissionRate != null,
+      updatedAt: updated.updatedAt,
+    };
   }
 
   async findAllPayouts(query: PaginationQueryDto & { status?: AffiliatePayoutStatus }) {

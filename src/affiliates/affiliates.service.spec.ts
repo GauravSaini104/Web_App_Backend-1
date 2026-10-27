@@ -85,6 +85,7 @@ const mockPrismaService = {
   order: {
     findUnique: jest.fn(),
     findMany: jest.fn(),
+    update: jest.fn(),
   },
   $transaction: jest.fn(),
 };
@@ -174,7 +175,7 @@ describe('AffiliatesService', () => {
   });
 
   describe('bookCommissionForOrder', () => {
-    it('should idempotently book commission on completed order', async () => {
+    it('should idempotently book commission on completed order with global fallback rate', async () => {
       mockPrismaService.order.findUnique.mockResolvedValue({
         id: 'ord-1',
         orderNumber: 1042,
@@ -182,9 +183,13 @@ describe('AffiliatesService', () => {
         subtotal: new Prisma.Decimal(1000.0),
         status: OrderStatus.COMPLETED,
       });
+      mockPrismaService.affiliateProfile.findUnique.mockResolvedValue({
+        customCommissionRate: null,
+      });
       mockPrismaService.affiliateEarning.findFirst.mockResolvedValue(null);
       mockPrismaService.affiliateSettings.upsert.mockResolvedValue(mockSettings);
       mockPrismaService.affiliateEarning.create.mockResolvedValue({});
+      mockPrismaService.order.update.mockResolvedValue({});
 
       await service.bookCommissionForOrder('ord-1');
 
@@ -194,9 +199,42 @@ describe('AffiliatesService', () => {
             affiliateId: 'aff-1',
             orderId: 'ord-1',
             amount: new Prisma.Decimal(50.0), // 5% of 1000
+            rateApplied: new Prisma.Decimal(5.0),
             type: AffiliateEarningType.COMMISSION,
             status: AffiliateEarningStatus.AVAILABLE,
-          }),  
+          }),
+        }),
+      );
+    });
+
+    it('should book commission with customCommissionRate when set on affiliate profile', async () => {
+      mockPrismaService.order.findUnique.mockResolvedValue({
+        id: 'ord-1',
+        orderNumber: 1042,
+        affiliateId: 'aff-1',
+        subtotal: new Prisma.Decimal(1000.0),
+        status: OrderStatus.COMPLETED,
+      });
+      mockPrismaService.affiliateProfile.findUnique.mockResolvedValue({
+        customCommissionRate: new Prisma.Decimal(8.5),
+      });
+      mockPrismaService.affiliateEarning.findFirst.mockResolvedValue(null);
+      mockPrismaService.affiliateSettings.upsert.mockResolvedValue(mockSettings);
+      mockPrismaService.affiliateEarning.create.mockResolvedValue({});
+      mockPrismaService.order.update.mockResolvedValue({});
+
+      await service.bookCommissionForOrder('ord-1');
+
+      expect(mockPrismaService.affiliateEarning.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            affiliateId: 'aff-1',
+            orderId: 'ord-1',
+            amount: new Prisma.Decimal(85.0), // 8.5% of 1000
+            rateApplied: new Prisma.Decimal(8.5),
+            type: AffiliateEarningType.COMMISSION,
+            status: AffiliateEarningStatus.AVAILABLE,
+          }),
         }),
       );
     });
@@ -214,6 +252,52 @@ describe('AffiliatesService', () => {
       await service.bookCommissionForOrder('ord-1');
 
       expect(mockPrismaService.affiliateEarning.create).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('updateAffiliateCommission', () => {
+    it('should update custom commission rate on affiliate profile', async () => {
+      mockPrismaService.affiliateProfile.findUnique.mockResolvedValue(mockProfile);
+      mockPrismaService.affiliateSettings.upsert.mockResolvedValue(mockSettings);
+      mockPrismaService.affiliateProfile.update.mockResolvedValue({
+        ...mockProfile,
+        customCommissionRate: new Prisma.Decimal(10.0),
+        updatedAt: new Date(),
+      });
+
+      const result = await service.updateAffiliateCommission('aff-1', {
+        customCommissionRate: 10.0,
+      });
+
+      expect(result.customCommissionRate).toBe(10.0);
+      expect(result.effectiveCommissionRate).toBe(10.0);
+      expect(result.isCustomRate).toBe(true);
+      expect(mockPrismaService.affiliateProfile.update).toHaveBeenCalledWith({
+        where: { id: 'aff-1' },
+        data: { customCommissionRate: new Prisma.Decimal(10.0) },
+      });
+    });
+
+    it('should reset custom commission rate to null when null is provided', async () => {
+      mockPrismaService.affiliateProfile.findUnique.mockResolvedValue(mockProfile);
+      mockPrismaService.affiliateSettings.upsert.mockResolvedValue(mockSettings);
+      mockPrismaService.affiliateProfile.update.mockResolvedValue({
+        ...mockProfile,
+        customCommissionRate: null,
+        updatedAt: new Date(),
+      });
+
+      const result = await service.updateAffiliateCommission('aff-1', {
+        customCommissionRate: null,
+      });
+
+      expect(result.customCommissionRate).toBeNull();
+      expect(result.effectiveCommissionRate).toBe(5.0); // global fallback
+      expect(result.isCustomRate).toBe(false);
+      expect(mockPrismaService.affiliateProfile.update).toHaveBeenCalledWith({
+        where: { id: 'aff-1' },
+        data: { customCommissionRate: null },
+      });
     });
   });
 });
