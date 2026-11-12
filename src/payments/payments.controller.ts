@@ -1,10 +1,12 @@
 import {
   Controller,
+  Get,
   Headers,
   HttpCode,
   HttpStatus,
   Param,
   Post,
+  Query,
   RawBodyRequest,
   Req,
   UseGuards,
@@ -14,10 +16,29 @@ import { PaymentsService } from './payments.service';
 import { CustomerAuthGuard } from '../auth/guards/customer-auth.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 import { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
+import { QueryPaymentsDto } from './dto/query-payments.dto';
 
 @Controller()
 export class PaymentsController {
   constructor(private readonly paymentsService: PaymentsService) {}
+
+  @Get(['payments/mine', 'payments/history'])
+  @UseGuards(CustomerAuthGuard)
+  findMine(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: QueryPaymentsDto,
+  ) {
+    return this.paymentsService.findMine(user.id, query);
+  }
+
+  @Get(['payments/mine/:id', 'payments/:id'])
+  @UseGuards(CustomerAuthGuard)
+  findOneMine(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id') id: string,
+  ) {
+    return this.paymentsService.findOneMine(user.id, id);
+  }
 
   @Post(['orders/:id/pay', 'payments/:id/initiate'])
   @UseGuards(CustomerAuthGuard)

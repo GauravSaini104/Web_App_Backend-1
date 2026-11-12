@@ -9,10 +9,11 @@ import {
   forwardRef,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { OrderStatus, PaymentMethod, PaymentStatus } from '@prisma/client';
+import { OrderStatus, PaymentMethod, PaymentStatus, Prisma } from '@prisma/client';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { PrismaService } from '../database/prisma.service';
 import { OrdersService } from '../orders/orders.service';
+import { QueryPaymentsDto } from './dto/query-payments.dto';
 
 interface RazorpayOrder {
   id: string;
@@ -52,6 +53,130 @@ export class PaymentsService {
       Boolean(this.configService.get<string>('RAZORPAY_KEY_ID')?.trim()) &&
       Boolean(this.configService.get<string>('RAZORPAY_KEY_SECRET')?.trim())
     );
+  }
+
+  /**
+   * Returns a paginated list of payment attempts made for orders belonging
+   * to the authenticated customer.
+   */
+  async findMine(customerId: string, query?: QueryPaymentsDto) {
+    const page = query?.page ?? 1;
+    const limit = query?.limit ?? 20;
+    const skip = (page - 1) * limit;
+
+    const where: Prisma.PaymentWhereInput = {
+      order: {
+        customerId,
+      },
+      ...(query?.status ? { status: query.status } : {}),
+      ...(query?.orderId ? { orderId: query.orderId } : {}),
+    };
+
+    const [items, total] = await Promise.all([
+      this.prisma.payment.findMany({
+        where,
+        include: {
+          order: {
+            select: {
+              id: true,
+              orderNumber: true,
+              status: true,
+              paymentMethod: true,
+              fulfillmentMethod: true,
+              subtotal: true,
+              deliveryFee: true,
+              createdAt: true,
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.payment.count({ where }),
+    ]);
+
+    return {
+      items: items.map((p) => ({
+        id: p.id,
+        orderId: p.orderId,
+        orderNumber: p.order.orderNumber,
+        orderStatus: p.order.status,
+        paymentMethod: p.order.paymentMethod,
+        fulfillmentMethod: p.order.fulfillmentMethod,
+        orderTotal: Number(
+          (Number(p.order.subtotal) + Number(p.order.deliveryFee ?? 0)).toFixed(2),
+        ),
+        orderCreatedAt: p.order.createdAt,
+        provider: p.provider,
+        providerOrderId: p.providerOrderId,
+        providerPaymentId: p.providerPaymentId,
+        amount: Number(p.amount),
+        status: p.status,
+        failureReason: p.failureReason,
+        createdAt: p.createdAt,
+        updatedAt: p.updatedAt,
+      })),
+      meta: {
+        total,
+        page,
+        limit,
+        totalPages: Math.ceil(total / limit),
+      },
+    };
+  }
+
+  /**
+   * Returns details for a single payment attempt belonging to the authenticated customer.
+   */
+  async findOneMine(customerId: string, id: string) {
+    const payment = await this.prisma.payment.findFirst({
+      where: {
+        id,
+        order: {
+          customerId,
+        },
+      },
+      include: {
+        order: {
+          select: {
+            id: true,
+            orderNumber: true,
+            status: true,
+            paymentMethod: true,
+            fulfillmentMethod: true,
+            subtotal: true,
+            deliveryFee: true,
+            createdAt: true,
+          },
+        },
+      },
+    });
+
+    if (!payment) {
+      throw new NotFoundException('Payment not found');
+    }
+
+    return {
+      id: payment.id,
+      orderId: payment.orderId,
+      orderNumber: payment.order.orderNumber,
+      orderStatus: payment.order.status,
+      paymentMethod: payment.order.paymentMethod,
+      fulfillmentMethod: payment.order.fulfillmentMethod,
+      orderTotal: Number(
+        (Number(payment.order.subtotal) + Number(payment.order.deliveryFee ?? 0)).toFixed(2),
+      ),
+      orderCreatedAt: payment.order.createdAt,
+      provider: payment.provider,
+      providerOrderId: payment.providerOrderId,
+      providerPaymentId: payment.providerPaymentId,
+      amount: Number(payment.amount),
+      status: payment.status,
+      failureReason: payment.failureReason,
+      createdAt: payment.createdAt,
+      updatedAt: payment.updatedAt,
+    };
   }
 
   /** Starts a payment attempt for a PENDING_PAYMENT UPI order. */

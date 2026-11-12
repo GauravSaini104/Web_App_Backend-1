@@ -11,7 +11,14 @@ const WEBHOOK_SECRET = 'test-webhook-secret';
 
 const mockPrismaService = {
   order: { findFirst: jest.fn() },
-  payment: { findUnique: jest.fn(), create: jest.fn(), update: jest.fn() },
+  payment: {
+    findUnique: jest.fn(),
+    findFirst: jest.fn(),
+    findMany: jest.fn(),
+    count: jest.fn(),
+    create: jest.fn(),
+    update: jest.fn(),
+  },
 };
 
 const mockOrdersService = { confirmPayment: jest.fn() };
@@ -224,6 +231,139 @@ describe('PaymentsService', () => {
         }),
       );
       expect(mockOrdersService.confirmPayment).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('findMine', () => {
+    it('returns paginated payments with order metadata for the customer', async () => {
+      const mockPayments = [
+        {
+          id: 'pay_1',
+          orderId: 'order_1',
+          provider: 'RAZORPAY',
+          providerOrderId: 'order_rzp_1',
+          providerPaymentId: 'pay_rzp_1',
+          amount: '499.00',
+          status: PaymentStatus.SUCCESS,
+          failureReason: null,
+          createdAt: new Date('2026-01-01'),
+          updatedAt: new Date('2026-01-01'),
+          order: {
+            id: 'order_1',
+            orderNumber: 101,
+            status: OrderStatus.CONFIRMED,
+            paymentMethod: PaymentMethod.UPI,
+            fulfillmentMethod: 'DELIVERY',
+            subtotal: '450.00',
+            deliveryFee: '49.00',
+            createdAt: new Date('2026-01-01'),
+          },
+        },
+      ];
+
+      mockPrismaService.payment.findMany.mockResolvedValue(mockPayments);
+      mockPrismaService.payment.count.mockResolvedValue(1);
+
+      const result = await service.findMine('cust_1', { page: 1, limit: 10 });
+
+      expect(mockPrismaService.payment.findMany).toHaveBeenCalledWith({
+        where: {
+          order: { customerId: 'cust_1' },
+        },
+        include: expect.any(Object),
+        orderBy: { createdAt: 'desc' },
+        skip: 0,
+        take: 10,
+      });
+
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0]).toEqual({
+        id: 'pay_1',
+        orderId: 'order_1',
+        orderNumber: 101,
+        orderStatus: OrderStatus.CONFIRMED,
+        paymentMethod: PaymentMethod.UPI,
+        fulfillmentMethod: 'DELIVERY',
+        orderTotal: 499,
+        orderCreatedAt: mockPayments[0].order.createdAt,
+        provider: 'RAZORPAY',
+        providerOrderId: 'order_rzp_1',
+        providerPaymentId: 'pay_rzp_1',
+        amount: 499,
+        status: PaymentStatus.SUCCESS,
+        failureReason: null,
+        createdAt: mockPayments[0].createdAt,
+        updatedAt: mockPayments[0].updatedAt,
+      });
+      expect(result.meta).toEqual({
+        total: 1,
+        page: 1,
+        limit: 10,
+        totalPages: 1,
+      });
+    });
+
+    it('filters by status and orderId when provided', async () => {
+      mockPrismaService.payment.findMany.mockResolvedValue([]);
+      mockPrismaService.payment.count.mockResolvedValue(0);
+
+      await service.findMine('cust_1', {
+        status: PaymentStatus.FAILED,
+        orderId: 'order_2',
+      });
+
+      expect(mockPrismaService.payment.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: {
+            order: { customerId: 'cust_1' },
+            status: PaymentStatus.FAILED,
+            orderId: 'order_2',
+          },
+        }),
+      );
+    });
+  });
+
+  describe('findOneMine', () => {
+    it('returns a single payment if found and belongs to customer', async () => {
+      const mockPayment = {
+        id: 'pay_1',
+        orderId: 'order_1',
+        provider: 'RAZORPAY',
+        providerOrderId: 'order_rzp_1',
+        providerPaymentId: 'pay_rzp_1',
+        amount: '250.00',
+        status: PaymentStatus.SUCCESS,
+        failureReason: null,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        order: {
+          id: 'order_1',
+          orderNumber: 102,
+          status: OrderStatus.CONFIRMED,
+          paymentMethod: PaymentMethod.UPI,
+          fulfillmentMethod: 'PICKUP',
+          subtotal: '250.00',
+          deliveryFee: '0.00',
+          createdAt: new Date(),
+        },
+      };
+
+      mockPrismaService.payment.findFirst.mockResolvedValue(mockPayment);
+
+      const result = await service.findOneMine('cust_1', 'pay_1');
+
+      expect(result.id).toBe('pay_1');
+      expect(result.amount).toBe(250);
+      expect(result.orderTotal).toBe(250);
+    });
+
+    it('throws NotFoundException if payment does not exist or does not belong to customer', async () => {
+      mockPrismaService.payment.findFirst.mockResolvedValue(null);
+
+      await expect(service.findOneMine('cust_1', 'nonexistent')).rejects.toThrow(
+        NotFoundException,
+      );
     });
   });
 });
