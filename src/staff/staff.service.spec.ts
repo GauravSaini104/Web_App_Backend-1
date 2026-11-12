@@ -119,4 +119,83 @@ describe('StaffService', () => {
       expect(result).toEqual({ success: true, message: 'Staff user deleted successfully' });
     });
   });
+
+  describe('changePassword', () => {
+    it('should throw BadRequestException if new password does not match confirm password', async () => {
+      await expect(
+        service.changePassword('staff-1', {
+          currentPassword: 'oldPass123',
+          newPassword: 'newPass123',
+          confirmPassword: 'differentPass',
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('should throw BadRequestException if new password is the same as current password', async () => {
+      await expect(
+        service.changePassword('staff-1', {
+          currentPassword: 'oldPass123',
+          newPassword: 'oldPass123',
+          confirmPassword: 'oldPass123',
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('should throw NotFoundException if staff is not found', async () => {
+      mockPrismaService.staffUser.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.changePassword('nonexistent', {
+          currentPassword: 'oldPass123',
+          newPassword: 'newPass123',
+          confirmPassword: 'newPass123',
+        }),
+      ).rejects.toThrow(NotFoundException);
+    });
+
+    it('should throw BadRequestException if current password does not match', async () => {
+      mockPrismaService.staffUser.findUnique.mockResolvedValue({
+        id: 'staff-1',
+        passwordHash: '$2b$10$invalidhashhere',
+      });
+
+      await expect(
+        service.changePassword('staff-1', {
+          currentPassword: 'wrongPassword',
+          newPassword: 'newPassword123',
+          confirmPassword: 'newPassword123',
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('should update password and return success when passwords match', async () => {
+      const bcrypt = require('bcrypt');
+      const currentHashed = await bcrypt.hash('correctOldPassword', 10);
+
+      mockPrismaService.staffUser.findUnique.mockResolvedValue({
+        id: 'staff-1',
+        passwordHash: currentHashed,
+      });
+      mockPrismaService.staffUser.update.mockResolvedValue({ id: 'staff-1' });
+
+      const result = await service.changePassword('staff-1', {
+        currentPassword: 'correctOldPassword',
+        newPassword: 'brandNewPassword123',
+        confirmPassword: 'brandNewPassword123',
+      });
+
+      expect(mockPrismaService.staffUser.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'staff-1' },
+          data: expect.objectContaining({
+            passwordHash: expect.any(String),
+          }),
+        }),
+      );
+      expect(result).toEqual({
+        success: true,
+        message: 'Password changed successfully',
+      });
+    });
+  });
 });

@@ -18,11 +18,30 @@ import { AuthenticatedUser } from '../auth/strategies/jwt.strategy';
 import { CreateStaffDto } from './dto/create-staff.dto';
 import { UpdateStaffDto } from './dto/update-staff.dto';
 import { QueryStaffDto } from './dto/query-staff.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
 
 @Controller('staff')
 @UseGuards(StaffAuthGuard)
 export class StaffController {
   constructor(private readonly staffService: StaffService) {}
+
+  @Post(['change-password', 'me/change-password'])
+  @HttpCode(HttpStatus.OK)
+  changePassword(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: ChangePasswordDto,
+  ) {
+    return this.staffService.changePassword(user.id, dto);
+  }
+
+  @Patch(['change-password', 'me/change-password'])
+  @HttpCode(HttpStatus.OK)
+  changePasswordPatch(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: ChangePasswordDto,
+  ) {
+    return this.staffService.changePassword(user.id, dto);
+  }
 
   @Post()
   create(@Body() dto: CreateStaffDto) {

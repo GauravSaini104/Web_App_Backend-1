@@ -6,6 +6,7 @@ import { handlePrismaError } from '../common/utils/prisma-error.util';
 import { CreateStaffDto } from './dto/create-staff.dto';
 import { UpdateStaffDto } from './dto/update-staff.dto';
 import { QueryStaffDto } from './dto/query-staff.dto';
+import { ChangePasswordDto } from './dto/change-password.dto';
 
 export const STAFF_SELECT = {
   id: true,
@@ -131,5 +132,39 @@ export class StaffService {
     } catch (error) {
       handlePrismaError(error, 'Staff account');
     }
+  }
+
+  async changePassword(staffId: string, dto: ChangePasswordDto) {
+    if (dto.newPassword !== dto.confirmPassword) {
+      throw new BadRequestException('New password and confirm password do not match');
+    }
+
+    if (dto.currentPassword === dto.newPassword) {
+      throw new BadRequestException('New password must be different from current password');
+    }
+
+    const staff = await this.prisma.staffUser.findUnique({
+      where: { id: staffId },
+    });
+
+    if (!staff) {
+      throw new NotFoundException('Staff user not found');
+    }
+
+    const isMatch = await bcrypt.compare(dto.currentPassword, staff.passwordHash);
+    if (!isMatch) {
+      throw new BadRequestException('Current password is incorrect');
+    }
+
+    const passwordHash = await bcrypt.hash(dto.newPassword, 10);
+    await this.prisma.staffUser.update({
+      where: { id: staffId },
+      data: { passwordHash },
+    });
+
+    return {
+      success: true,
+      message: 'Password changed successfully',
+    };
   }
 }
