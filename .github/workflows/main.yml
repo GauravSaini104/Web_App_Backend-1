@@ -1,0 +1,61 @@
+name: Deploy Backend
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: false
+
+jobs:
+  # Fast safety net: fail before touching the server if it doesn't compile
+  build-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      - run: npm run build
+
+  deploy:
+    needs: build-check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          script_stop: true
+          script: |
+            APP=/var/www/backend
+            [ -d $APP/.git ] || git clone https://github.com/GauravSaini104/Web_App_Backend-1.git $APP
+            cd $APP
+            git fetch origin main
+            git reset --hard origin/main
+
+            # Postgres (uses the repo's docker-compose.yml; needs .env on the server)
+            docker compose up -d
+
+            npm ci
+            npx prisma generate
+            npx prisma migrate deploy
+            npm run build
+
+            if pm2 describe grocery-api > /dev/null 2>&1; then
+              pm2 reload grocery-api --update-env
+            else
+              pm2 start npm --name grocery-api -- run start:prod
+            fi
+            pm2 save
+
+            # Health check
+            sleep 5
+            curl -fsS http://127.0.0.1:3000/health
