@@ -1,3 +1,5 @@
+# Save as: .github/workflows/deploy.yml  (backend repo)
+# Secrets needed: SSH_HOST, SSH_USER, SSH_KEY
 name: Deploy Backend
 
 on:
@@ -10,7 +12,6 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Fast safety net: fail before touching the server if it doesn't compile
   build-check:
     runs-on: ubuntu-latest
     steps:
@@ -33,29 +34,60 @@ jobs:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_KEY }}
+          command_timeout: 20m
           script_stop: true
+          envs: GITHUB_REPOSITORY
           script: |
+            set -euo pipefail
             APP=/var/www/backend
-            [ -d $APP/.git ] || git clone https://github.com/GauravSaini104/Web_App_Backend-1.git $APP
+            REPO_URL="https://github.com/${GITHUB_REPOSITORY}.git"
+
+            # --- 1. Swap (one-time) so the Nest build doesn't get OOM-killed
+            if ! swapon --show | grep -q /swapfile; then
+              [ -f /swapfile ] || { fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile; }
+              swapon /swapfile || true
+              grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+            fi
+
+            # --- 2. Get latest code
+            [ -d $APP/.git ] || git clone "$REPO_URL" $APP
             cd $APP
+            git remote set-url origin "$REPO_URL"
             git fetch origin main
             git reset --hard origin/main
 
-            # Postgres (uses the repo's docker-compose.yml; needs .env on the server)
-            docker compose up -d
+            # --- 3. .env must exist (created once by hand on the server)
+            [ -f .env ] || { echo "ERROR: $APP/.env is missing"; exit 1; }
+            set -a; source .env; set +a
 
+            # --- 4. Database
+            docker compose up -d postgres 2>/dev/null || docker compose up -d
+            for i in $(seq 1 20); do
+              docker compose ps | grep -q "healthy" && break
+              sleep 2
+            done
+
+            # --- 5. Build + migrate
             npm ci
             npx prisma generate
             npx prisma migrate deploy
-            npm run build
+            NODE_OPTIONS=--max-old-space-size=1536 npm run build
 
+            # --- 6. Restart app (picks up new .env values too)
             if pm2 describe grocery-api > /dev/null 2>&1; then
-              pm2 reload grocery-api --update-env
+              pm2 restart grocery-api --update-env
             else
               pm2 start npm --name grocery-api -- run start:prod
             fi
             pm2 save
 
-            # Health check
-            sleep 5
-            curl -fsS http://127.0.0.1:3000/health
+            # --- 7. Health check: any real HTTP answer (not 000/5xx) means the app is up
+            PORT="${PORT:-3000}"
+            for i in $(seq 1 15); do
+              CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${PORT}/health" || true)
+              if [ "$CODE" != "000" ] && [ "${CODE:0:1}" != "5" ]; then
+                echo "App is up (HTTP $CODE)"; exit 0
+              fi
+              sleep 2
+            done
+            echo "App did not become healthy"; pm2 logs grocery-api --lines 40 --nostream; exit 1
