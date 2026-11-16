@@ -1,5 +1,8 @@
 # Save as: .github/workflows/deploy.yml  (backend repo)
 # Secrets needed: SSH_HOST, SSH_USER, SSH_KEY
+#
+# Strategy: BUILD on GitHub (plenty of RAM), SHIP the compiled dist/ to the server,
+# then migrate + restart there. If the new version is unhealthy, auto-rollback.
 name: Deploy Backend
 
 on:
@@ -12,68 +15,100 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-check:
+  deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
+      # ---------- 1. Build on the runner ----------
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
-      - run: npm ci
+
+      - run: npm ci --no-audit --no-fund
       - run: npx prisma generate
       - run: npm run build
 
-  deploy:
-    needs: build-check
-    runs-on: ubuntu-latest
-    steps:
-      - name: Deploy over SSH
+      - name: Verify build output
+        run: |
+          ls -la dist
+          test -f dist/main.js || test -f dist/src/main.js || { echo "No main.js in dist/"; exit 1; }
+
+      # ---------- 2. Prepare the server ----------
+      - name: Prepare server (code, swap, .env check)
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_KEY }}
-          command_timeout: 20m
           script_stop: true
-          envs: GITHUB_REPOSITORY
           script: |
             set -euo pipefail
             APP=/var/www/backend
-            REPO_URL="https://github.com/${GITHUB_REPOSITORY}.git"
+            REPO_URL="https://github.com/${{ github.repository }}.git"
 
-            # --- 1. Swap (one-time) so the Nest build doesn't get OOM-killed
+            # swap (one-time) so npm ci never gets OOM-killed
             if ! swapon --show | grep -q /swapfile; then
               [ -f /swapfile ] || { fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile; }
               swapon /swapfile || true
               grep -q '/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
             fi
 
-            # --- 2. Get latest code
             [ -d $APP/.git ] || git clone "$REPO_URL" $APP
             cd $APP
             git remote set-url origin "$REPO_URL"
             git fetch origin main
             git reset --hard origin/main
 
-            # --- 3. .env must exist (created once by hand on the server)
             [ -f .env ] || { echo "ERROR: $APP/.env is missing"; exit 1; }
-            set -a; source .env; set +a
+            rm -rf dist_new && mkdir -p dist_new
 
-            # --- 4. Database
-            docker compose up -d postgres 2>/dev/null || docker compose up -d
-            for i in $(seq 1 20); do
-              docker compose ps | grep -q "healthy" && break
+      # ---------- 3. Upload compiled output ----------
+      - name: Upload dist/
+        uses: burnett01/rsync-deployments@7.0.1
+        with:
+          switches: -az --delete
+          path: dist/
+          remote_path: /var/www/backend/dist_new/
+          remote_host: ${{ secrets.SSH_HOST }}
+          remote_user: ${{ secrets.SSH_USER }}
+          remote_key: ${{ secrets.SSH_KEY }}
+
+      # ---------- 4. Migrate, switch, restart, verify, rollback if needed ----------
+      - name: Release
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          command_timeout: 15m
+          script_stop: true
+          script: |
+            set -euo pipefail
+            cd /var/www/backend
+            set -a; source .env; set +a
+            PORT="${PORT:-3000}"
+
+            # database up + healthy
+            docker compose up -d
+            for i in $(seq 1 30); do
+              docker ps --format '{{.Names}} {{.Status}}' | grep -q 'healthy' && break
               sleep 2
             done
 
-            # --- 5. Build + migrate
-            npm ci
+            # dependencies + prisma (a failure here stops the release, app keeps running old code)
+            npm ci --no-audit --no-fund
             npx prisma generate
             npx prisma migrate deploy
-            NODE_OPTIONS=--max-old-space-size=1536 npm run build
 
-            # --- 6. Restart app (picks up new .env values too)
+            # switch dist (keep previous for rollback)
+            rm -rf dist.prev
+            [ -d dist ] && mv dist dist.prev
+            mv dist_new dist
+
+            # restart
             if pm2 describe grocery-api > /dev/null 2>&1; then
               pm2 restart grocery-api --update-env
             else
@@ -81,13 +116,31 @@ jobs:
             fi
             pm2 save
 
-            # --- 7. Health check: any real HTTP answer (not 000/5xx) means the app is up
-            PORT="${PORT:-3000}"
-            for i in $(seq 1 15); do
-              CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${PORT}/health" || true)
-              if [ "$CODE" != "000" ] && [ "${CODE:0:1}" != "5" ]; then
-                echo "App is up (HTTP $CODE)"; exit 0
-              fi
-              sleep 2
-            done
-            echo "App did not become healthy"; pm2 logs grocery-api --lines 40 --nostream; exit 1
+            # health check: any real HTTP answer that is not 000/5xx = up
+            healthy() {
+              for i in $(seq 1 20); do
+                CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${PORT}/health" || true)
+                if [ "$CODE" != "000" ] && [ "${CODE:0:1}" != "5" ]; then
+                  echo "App is up (HTTP $CODE)"; return 0
+                fi
+                sleep 2
+              done
+              return 1
+            }
+
+            if healthy; then
+              echo "Deploy OK"
+              exit 0
+            fi
+
+            echo "New version unhealthy. Recent logs:"
+            pm2 logs grocery-api --lines 60 --nostream || true
+
+            if [ -d dist.prev ]; then
+              echo "Rolling back to previous build..."
+              rm -rf dist.failed && mv dist dist.failed
+              mv dist.prev dist
+              pm2 restart grocery-api --update-env
+              sleep 5
+            fi
+            exit 1
