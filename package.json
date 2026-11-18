@@ -25,6 +25,7 @@
     "prisma:studio": "prisma studio",
     "seed": "ts-node prisma/seed.ts",
     "create:admin": "node scripts/create-admin.js",
+    "verify:staff": "node scripts/verify-staff.js",
     "postinstall": "prisma generate"
   },
   "dependencies": {

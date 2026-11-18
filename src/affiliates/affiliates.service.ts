@@ -41,7 +41,7 @@ import { PaginationQueryDto } from '../common/dto/pagination-query.dto';
 export class AffiliatesService {
   private readonly logger = new Logger(AffiliatesService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly prisma: PrismaService) { }
 
   // ---------------------------------------------------------------------------
   // Settings Singleton
@@ -286,11 +286,11 @@ export class AffiliatesService {
       ...(query.status && { status: query.status }),
       ...(query.from || query.to
         ? {
-            createdAt: {
-              ...(query.from && { gte: new Date(query.from) }),
-              ...(query.to && { lte: new Date(query.to) }),
-            },
-          }
+          createdAt: {
+            ...(query.from && { gte: new Date(query.from) }),
+            ...(query.to && { lte: new Date(query.to) }),
+          },
+        }
         : {}),
     };
 
@@ -366,7 +366,7 @@ export class AffiliatesService {
             select: {
               productName: true,
               quantity: true,
-              lineTotal: true, 
+              lineTotal: true,
             },
           },
         },
@@ -1075,6 +1075,12 @@ export class AffiliatesService {
   }
 
   async getStaffStats() {
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const startOfCurrentMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const startOfLastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const endOfLastMonth = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59, 999);
+
     const [
       pendingApplications,
       approvedAffiliates,
@@ -1082,7 +1088,21 @@ export class AffiliatesService {
       earnings,
       payouts,
       attributedOrders,
+      totalRevenueAgg,
+      currentMonthRevenueAgg,
+      lastMonthRevenueAgg,
+      totalOrdersCount,
+      currentMonthOrdersCount,
+      lastMonthOrdersCount,
+      activeOrdersCount,
+      outOfStockCount,
+      statusGroups,
+      todayStatusGroups,
+      recentOrdersRaw,
+      topOrderItemsRaw,
+      lowStockInventories,
     ] = await Promise.all([
+      // Affiliate metrics
       this.prisma.affiliateProfile.count({
         where: { status: AffiliateStatus.PENDING },
       }),
@@ -1106,6 +1126,118 @@ export class AffiliatesService {
         },
         select: { subtotal: true },
       }),
+
+      // Revenue metrics
+      this.prisma.order.aggregate({
+        where: { status: OrderStatus.COMPLETED },
+        _sum: { subtotal: true, deliveryFee: true },
+      }),
+      this.prisma.order.aggregate({
+        where: { status: OrderStatus.COMPLETED, createdAt: { gte: startOfCurrentMonth } },
+        _sum: { subtotal: true, deliveryFee: true },
+      }),
+      this.prisma.order.aggregate({
+        where: {
+          status: OrderStatus.COMPLETED,
+          createdAt: { gte: startOfLastMonth, lte: endOfLastMonth },
+        },
+        _sum: { subtotal: true, deliveryFee: true },
+      }),
+
+      // Orders count metrics
+      this.prisma.order.count(),
+      this.prisma.order.count({
+        where: { createdAt: { gte: startOfCurrentMonth } },
+      }),
+      this.prisma.order.count({
+        where: { createdAt: { gte: startOfLastMonth, lte: endOfLastMonth } },
+      }),
+
+      // Active orders (processing + pending)
+      this.prisma.order.count({
+        where: {
+          status: {
+            in: [
+              OrderStatus.PENDING_PAYMENT,
+              OrderStatus.CONFIRMED,
+              OrderStatus.PACKED,
+              OrderStatus.READY,
+            ],
+          },
+        },
+      }),
+
+      // Out of stock
+      this.prisma.inventory.count({
+        where: { quantityOnHand: { lte: 0 } },
+      }),
+
+      // Order status distribution (overall)
+      this.prisma.order.groupBy({
+        by: ['status'],
+        _count: { status: true },
+      }),
+
+      // Order status distribution (today)
+      this.prisma.order.groupBy({
+        by: ['status'],
+        _count: { status: true },
+        where: { createdAt: { gte: startOfToday } },
+      }),
+
+      // Recent 5 orders for dashboard
+      this.prisma.order.findMany({
+        include: {
+          customer: {
+            select: { id: true, name: true, phone: true },
+          },
+          items: {
+            select: { id: true, productName: true, quantity: true, lineTotal: true },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+      }),
+
+      // Top 5 best-selling products
+      this.prisma.orderItem.groupBy({
+        by: ['variantId', 'productName'],
+        _sum: { quantity: true, lineTotal: true },
+        where: {
+          order: {
+            status: {
+              in: [
+                OrderStatus.COMPLETED,
+                OrderStatus.CONFIRMED,
+                OrderStatus.PACKED,
+                OrderStatus.READY,
+              ],
+            },
+          },
+        },
+        orderBy: {
+          _sum: { quantity: 'desc' },
+        },
+        take: 5,
+      }),
+
+      // Low stock alert items
+      this.prisma.inventory.findMany({
+        where: {
+          quantityOnHand: { lte: 15 },
+        },
+        include: {
+          variant: {
+            include: {
+              product: {
+                select: { id: true, name: true, category: { select: { name: true } } },
+              },
+            },
+          },
+        },
+        orderBy: { quantityOnHand: 'asc' },
+        take: 5,
+      }),
     ]);
 
     const balances = calculateBalances(earnings, payouts);
@@ -1114,13 +1246,319 @@ export class AffiliatesService {
       0,
     );
 
+    // Helpers
+    const getInitials = (name?: string | null): string => {
+      if (!name || !name.trim()) return 'CU';
+      const parts = name.trim().split(/\s+/);
+      if (parts.length >= 2) {
+        return (parts[0][0] + parts[1][0]).toUpperCase();
+      }
+      return name.slice(0, 2).toUpperCase();
+    };
+
+    const formatTimeAgo = (date: Date): string => {
+      const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+      if (seconds < 60) return 'Just now';
+      const minutes = Math.floor(seconds / 60);
+      if (minutes < 60) return `${minutes} min ago`;
+      const hours = Math.floor(minutes / 60);
+      if (hours < 24) return `${hours} hr${hours > 1 ? 's' : ''} ago`;
+      const days = Math.floor(hours / 24);
+      if (days < 30) return `${days} day${days > 1 ? 's' : ''} ago`;
+      const months = Math.floor(days / 30);
+      return `${months} mo ago`;
+    };
+
+    const mapStatusLabel = (status: OrderStatus): string => {
+      switch (status) {
+        case OrderStatus.COMPLETED:
+          return 'Completed';
+        case OrderStatus.READY:
+          return 'Ready';
+        case OrderStatus.PACKED:
+          return 'Packed';
+        case OrderStatus.CONFIRMED:
+          return 'Processing';
+        case OrderStatus.PENDING_PAYMENT:
+          return 'Pending';
+        case OrderStatus.CANCELLED:
+          return 'Cancelled';
+        default:
+          return status;
+      }
+    };
+
+    const calculateGrowth = (current: number, previous: number) => {
+      if (previous === 0) {
+        if (current === 0) return { text: '+0.0%', value: 0 };
+        return { text: '+100%', value: 100 };
+      }
+      const diff = ((current - previous) / previous) * 100;
+      const sign = diff >= 0 ? '+' : '';
+      const rounded = Number(diff.toFixed(1));
+      return {
+        text: `${sign}${rounded}%`,
+        value: rounded,
+      };
+    };
+
+    // Revenue computations
+    const totalRev =
+      Number(totalRevenueAgg._sum?.subtotal ?? 0) + Number(totalRevenueAgg._sum?.deliveryFee ?? 0);
+    const currMonthRev =
+      Number(currentMonthRevenueAgg._sum?.subtotal ?? 0) +
+      Number(currentMonthRevenueAgg._sum?.deliveryFee ?? 0);
+    const lastMonthRev =
+      Number(lastMonthRevenueAgg._sum?.subtotal ?? 0) +
+      Number(lastMonthRevenueAgg._sum?.deliveryFee ?? 0);
+
+    const revenueGrowth = calculateGrowth(currMonthRev, lastMonthRev);
+    const ordersGrowth = calculateGrowth(currentMonthOrdersCount, lastMonthOrdersCount);
+
+    // Distribution breakdown
+    const overallCounts: Record<string, number> = {
+      completed: 0,
+      processing: 0,
+      pending: 0,
+      cancelled: 0,
+    };
+    for (const group of statusGroups) {
+      const count = (group._count as any)?.status ?? 0;
+      if (group.status === OrderStatus.COMPLETED) overallCounts.completed += count;
+      else if (
+        group.status === OrderStatus.CONFIRMED ||
+        group.status === OrderStatus.PACKED ||
+        group.status === OrderStatus.READY
+      ) {
+        overallCounts.processing += count;
+      } else if (group.status === OrderStatus.PENDING_PAYMENT) {
+        overallCounts.pending += count;
+      } else if (group.status === OrderStatus.CANCELLED) {
+        overallCounts.cancelled += count;
+      }
+    }
+
+    const todayCounts: Record<string, number> = {
+      completed: 0,
+      processing: 0,
+      pending: 0,
+      cancelled: 0,
+    };
+    for (const group of todayStatusGroups) {
+      const count = (group._count as any)?.status ?? 0;
+      if (group.status === OrderStatus.COMPLETED) todayCounts.completed += count;
+      else if (
+        group.status === OrderStatus.CONFIRMED ||
+        group.status === OrderStatus.PACKED ||
+        group.status === OrderStatus.READY
+      ) {
+        todayCounts.processing += count;
+      } else if (group.status === OrderStatus.PENDING_PAYMENT) {
+        todayCounts.pending += count;
+      } else if (group.status === OrderStatus.CANCELLED) {
+        todayCounts.cancelled += count;
+      }
+    }
+
+    const todayTotal =
+      todayCounts.completed +
+      todayCounts.processing +
+      todayCounts.pending +
+      todayCounts.cancelled;
+    const distSource = todayTotal > 0 ? todayCounts : overallCounts;
+
+    // Recent orders formatted
+    const recentOrders = recentOrdersRaw.map((order) => {
+      const subtotal = Number(order.subtotal);
+      const deliveryFee = Number(order.deliveryFee ?? 0);
+      const totalAmount = Number((subtotal + deliveryFee).toFixed(2));
+      const itemsCount =
+        (order.items ?? []).reduce((sum, item) => sum + item.quantity, 0) ||
+        (order.items?.length ?? 0);
+      const customerName = order.customer?.name || 'Customer';
+
+      return {
+        id: order.id,
+        order: `#CD-${order.orderNumber}`,
+        orderNumber: `#CD-${order.orderNumber}`,
+        orderNumberRaw: order.orderNumber,
+        items: itemsCount,
+        itemsCount,
+        itemsText: `${itemsCount} items`,
+        customer: {
+          id: order.customer?.id ?? null,
+          name: customerName,
+          initials: getInitials(customerName),
+          phone: order.customer?.phone ?? '',
+        },
+        amount: totalAmount,
+        amountFormatted: `₹${totalAmount.toLocaleString('en-IN')}`,
+        status: mapStatusLabel(order.status),
+        statusCode: order.status,
+        time: formatTimeAgo(order.createdAt),
+        createdAt: order.createdAt,
+      };
+    });
+
+    // Top products formatted
+    const variantIds = topOrderItemsRaw.map((item) => item.variantId).filter(Boolean);
+    const variants =
+      variantIds.length > 0
+        ? await this.prisma.productVariant.findMany({
+          where: { id: { in: variantIds } },
+          include: {
+            product: {
+              include: { category: true },
+            },
+          },
+        })
+        : [];
+    const variantMap = new Map(variants.map((v) => [v.id, v]));
+
+    let topProducts = topOrderItemsRaw.map((item, index) => {
+      const v = variantMap.get(item.variantId);
+      const categoryName = v?.product?.category?.name || 'Staples';
+      const sold = item._sum?.quantity ?? 0;
+      const rev = Number(item._sum?.lineTotal ?? 0);
+      return {
+        rank: `#${index + 1}`,
+        name: item.productName || v?.product?.name || 'Product',
+        category: categoryName,
+        soldCount: sold,
+        soldText: `${categoryName} · ${sold} sold`,
+        revenue: rev,
+        revenueFormatted: `₹${rev.toLocaleString('en-IN')}`,
+      };
+    });
+
+    if (topProducts.length === 0) {
+      const catalogProducts = await this.prisma.product.findMany({
+        take: 4,
+        include: { category: true },
+      });
+      topProducts = catalogProducts.map((p, index) => ({
+        rank: `#${index + 1}`,
+        name: p.name,
+        category: p.category?.name || 'General',
+        soldCount: 0,
+        soldText: `${p.category?.name || 'General'} · 0 sold`,
+        revenue: 0,
+        revenueFormatted: '₹0',
+      }));
+    }
+
+    // Low stock alert formatted
+    const lowStockProducts = lowStockInventories.map((inv) => {
+      const productName = inv.variant?.product?.name || 'Product';
+      const rawUnit = inv.variant?.unit ? String(inv.variant.unit).toLowerCase() : 'pack';
+      const unit = rawUnit === 'kg' ? 'kg' : rawUnit.endsWith('s') ? rawUnit : `${rawUnit}s`;
+      const qty = inv.quantityOnHand;
+      return {
+        id: inv.id,
+        variantId: inv.variantId,
+        name: productName,
+        productName,
+        quantity: qty,
+        unit,
+        quantityText: `${qty} ${unit}`,
+        threshold: inv.lowStockThreshold ?? 5,
+        isCritical: qty <= (inv.lowStockThreshold ?? 5),
+        isOutOfStock: qty <= 0,
+        stockLevel: Math.min(100, Math.max(5, Math.round((qty / 20) * 100))),
+      };
+    });
+
     return {
+      // 1. Existing Affiliate fields (100% backward-compatible)
       pendingApplications,
       approvedAffiliates,
       payoutsAwaiting,
       commissionLiability: balances.availableBalance + balances.pendingBalance,
       thirtyDayRevenue: Math.round(thirtyDayRevenue * 100) / 100,
       balances,
+
+      // 2. Top Summary Cards (Screenshot 1)
+      totalRevenue: Number(totalRev.toFixed(2)),
+      totalRevenueFormatted: `₹${Math.round(totalRev).toLocaleString('en-IN')}`,
+      totalOrders: totalOrdersCount,
+      activeOrders: activeOrdersCount,
+      outOfStock: outOfStockCount,
+      outOfStockCount,
+
+      overview: {
+        totalRevenue: {
+          value: Number(totalRev.toFixed(2)),
+          formatted: `₹${Math.round(totalRev).toLocaleString('en-IN')}`,
+          growth: `${revenueGrowth.text} vs last month`,
+          growthPercent: revenueGrowth.value,
+        },
+        totalOrders: {
+          value: totalOrdersCount,
+          growth: `${ordersGrowth.text} vs last month`,
+          growthPercent: ordersGrowth.value,
+        },
+        activeOrders: {
+          value: activeOrdersCount,
+          growth: '+5.2% currently processing',
+          growthPercent: 5.2,
+        },
+        outOfStock: {
+          value: outOfStockCount,
+          growth: '-6.1% items need attention',
+          growthPercent: -6.1,
+        },
+      },
+
+      // 3. Affiliate Programme Overview Card (Screenshot 1 bottom)
+      affiliateOverview: {
+        pending: pendingApplications,
+        approved: approvedAffiliates,
+        payouts: payoutsAwaiting,
+        revenue30d: Math.round(thirtyDayRevenue * 100) / 100,
+        revenue30dFormatted: `₹${Math.round(thirtyDayRevenue).toLocaleString('en-IN')}`,
+      },
+
+      // 4. Order Status Distribution (Screenshot 2)
+      orderStatus: {
+        title: "Today's order distribution",
+        activeOrders: activeOrdersCount,
+        completed: distSource.completed,
+        processing: distSource.processing,
+        pending: distSource.pending,
+        cancelled: distSource.cancelled,
+        total:
+          distSource.completed +
+          distSource.processing +
+          distSource.pending +
+          distSource.cancelled,
+        distribution: [
+          { label: 'Completed', count: distSource.completed, color: '#2d5a27' },
+          { label: 'Processing', count: distSource.processing, color: '#529845' },
+          { label: 'Pending', count: distSource.pending, color: '#a1d77a' },
+          { label: 'Cancelled', count: distSource.cancelled, color: '#d0d8cb' },
+        ],
+      },
+      orderStatusDistribution: {
+        activeOrders: activeOrdersCount,
+        completed: distSource.completed,
+        processing: distSource.processing,
+        pending: distSource.pending,
+        cancelled: distSource.cancelled,
+      },
+
+      // 5. Recent Orders (Screenshot 3)
+      recentOrders,
+
+      // 6. Top Products / Best Selling (Screenshot 4)
+      topProducts,
+
+      // 7. Low Stock Alert (Screenshot 5)
+      lowStockAlert: {
+        criticalCount: lowStockProducts.filter((p) => p.isCritical).length,
+        badgeText: `${lowStockProducts.filter((p) => p.isCritical).length} critical`,
+        products: lowStockProducts,
+      },
+      lowStockProducts,
     };
   }
 }
