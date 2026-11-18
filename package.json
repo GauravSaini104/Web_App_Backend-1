@@ -23,6 +23,8 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
     "prisma:studio": "prisma studio",
+    "seed": "ts-node prisma/seed.ts",
+    "create:admin": "node scripts/create-admin.js",
     "postinstall": "prisma generate"
   },
   "dependencies": {
@@ -88,5 +90,8 @@
     ],
     "coverageDirectory": "../coverage",
     "testEnvironment": "node"
+  },
+  "prisma": {
+    "seed": "ts-node prisma/seed.ts"
   }
 }

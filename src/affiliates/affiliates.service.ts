@@ -366,7 +366,7 @@ export class AffiliatesService {
             select: {
               productName: true,
               quantity: true,
-              lineTotal: true,
+              lineTotal: true, 
             },
           },
         },
